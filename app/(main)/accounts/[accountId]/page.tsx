@@ -1,22 +1,29 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import { HttpError } from "@/lib/api/client";
 import { useAccount, useTransactions } from "@/lib/api/hooks";
 import { AccountDetailCard } from "@/components/features/account/AccountDetailCard";
 import { TransactionList } from "@/components/features/transaction/TransactionList";
+import { TransactionFilter } from "@/components/features/transaction/TransactionFilter";
+import { TransactionPagination } from "@/components/features/transaction/TransactionPagination";
 import { Button } from "@/components/ui/button";
+import type { TransactionType } from "@/lib/api/types";
 
 export default function AccountDetailPage() {
   const { accountId } = useParams<{ accountId: string }>();
+  const searchParams = useSearchParams();
+
+  const page = Math.max(1, Number(searchParams.get("page") ?? "1"));
+  const type = (searchParams.get("type") ?? "ALL") as TransactionType;
 
   const { data: account, isLoading: accountLoading, error: accountError } = useAccount(accountId);
   const { data: txnPage, isLoading: txnLoading } = useTransactions(accountId, {
-    page: 1,
+    page,
     size: 20,
-    type: "ALL",
+    type,
   });
 
   if (accountError) {
@@ -52,14 +59,29 @@ export default function AccountDetailPage() {
       />
 
       {/* 거래 내역 */}
-      <section>
-        <h2 className="text-lg font-semibold mb-3">거래 내역</h2>
-        <div className="rounded-xl border bg-card overflow-hidden">
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">거래 내역</h2>
+          <TransactionFilter accountId={accountId} current={type} />
+        </div>
+
+        <div
+          className="rounded-xl border bg-card overflow-hidden"
+          style={{ opacity: txnLoading ? 0.5 : 1, transition: "opacity 0.2s" }}
+        >
           <TransactionList
             transactions={txnPage?.content ?? []}
-            isLoading={txnLoading}
+            isLoading={txnLoading && !txnPage}
             grouped
           />
+          {txnPage && (
+            <TransactionPagination
+              accountId={accountId}
+              currentPage={page}
+              totalPages={txnPage.totalPages}
+              type={type}
+            />
+          )}
         </div>
       </section>
     </div>
