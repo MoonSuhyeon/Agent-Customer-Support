@@ -1,28 +1,11 @@
-"use client";
-
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { useAccounts } from "@/lib/api/hooks";
-import { Skeleton } from "@/components/ui/skeleton";
+import { List } from "lucide-react";
 
 export default function TransactionsPage() {
-  const router = useRouter();
-  const { data: accounts = [], isLoading } = useAccounts();
-
-  useEffect(() => {
-    if (!isLoading && accounts.length > 0) {
-      router.replace(`/accounts/${accounts[0].accountId}?type=ALL`);
-    }
-  }, [accounts, isLoading, router]);
-
   return (
-    <div className="max-w-2xl mx-auto space-y-4">
-      <Skeleton className="h-8 w-32" />
-      <div className="rounded-xl border bg-card p-6 space-y-3">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <Skeleton key={i} className="h-12 w-full" />
-        ))}
-      </div>
+    <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
+      <List className="h-12 w-12 text-muted-foreground" />
+      <h1 className="text-xl font-semibold">거래 내역</h1>
+      <p className="text-muted-foreground">준비 중인 기능입니다.</p>
     </div>
   );
 }

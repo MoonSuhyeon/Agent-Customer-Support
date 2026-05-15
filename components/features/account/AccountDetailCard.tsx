@@ -4,6 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { toast } from "@/hooks/use-toast";
 import type { Account } from "@/lib/api/types";
 
 interface Props {
@@ -68,7 +69,10 @@ export function AccountDetailCard({ account, isLoading, accountId }: Props) {
               이체하기
             </Link>
           </Button>
-          <Button variant="outline" onClick={() => alert("입금 기능 준비 중입니다.")}>
+          <Button
+            variant="outline"
+            onClick={() => toast({ title: "준비 중", description: "입금 기능은 준비 중입니다." })}
+          >
             입금하기
           </Button>
         </div>
