@@ -1,5 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getAccounts, getAccount, getTransactions, type TransactionParams } from "./accounts";
+import { getProfile, updateProfile, changePassword, changeTransferPassword } from "./settings";
 
 export function useAccounts() {
   return useQuery({
@@ -22,4 +23,27 @@ export function useTransactions(accountId: string, params: TransactionParams = {
     queryFn: () => getTransactions(accountId, params),
     enabled: !!accountId,
   });
+}
+
+export function useProfile() {
+  return useQuery({
+    queryKey: ["user", "profile"],
+    queryFn: getProfile,
+  });
+}
+
+export function useUpdateProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: updateProfile,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["user", "profile"] }),
+  });
+}
+
+export function useChangePassword() {
+  return useMutation({ mutationFn: changePassword });
+}
+
+export function useChangeTransferPassword() {
+  return useMutation({ mutationFn: changeTransferPassword });
 }

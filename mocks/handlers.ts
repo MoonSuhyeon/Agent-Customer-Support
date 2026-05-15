@@ -4,6 +4,18 @@ import type { Account, Transaction, TransferRequest, TransferSuccess, ApiError }
 const MOCK_PASSWORD = "1234";
 
 // ──────────────────────────────────────────────
+// 사용자 프로필 시드 데이터
+// ──────────────────────────────────────────────
+
+const userProfile = {
+  name: "홍길동",
+  email: "hong@example.com",
+  phone: "010-1234-5678",
+};
+
+const MOCK_TRANSFER_PASSWORD = "1234";
+
+// ──────────────────────────────────────────────
 // 계좌 시드 데이터
 // ──────────────────────────────────────────────
 
@@ -266,6 +278,43 @@ export const handlers = [
       currentPage: page,
       size,
     });
+  }),
+
+  // GET /api/user/profile
+  http.get("/api/user/profile", () => {
+    return HttpResponse.json(userProfile);
+  }),
+
+  // PATCH /api/user/profile
+  http.patch("/api/user/profile", async ({ request }) => {
+    const body = (await request.json()) as { email?: string; phone?: string };
+    if (body.email) userProfile.email = body.email;
+    if (body.phone) userProfile.phone = body.phone;
+    return HttpResponse.json(userProfile);
+  }),
+
+  // PATCH /api/user/password
+  http.patch("/api/user/password", async ({ request }) => {
+    const body = (await request.json()) as { current: string; next: string };
+    if (body.current !== MOCK_PASSWORD) {
+      return HttpResponse.json(
+        { error: { code: "INVALID_PASSWORD", message: "현재 비밀번호가 올바르지 않습니다." } },
+        { status: 400 },
+      );
+    }
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // PATCH /api/user/transfer-password
+  http.patch("/api/user/transfer-password", async ({ request }) => {
+    const body = (await request.json()) as { current: string; next: string };
+    if (body.current !== MOCK_TRANSFER_PASSWORD) {
+      return HttpResponse.json(
+        { error: { code: "INVALID_PASSWORD", message: "현재 이체 비밀번호가 올바르지 않습니다." } },
+        { status: 400 },
+      );
+    }
+    return new HttpResponse(null, { status: 204 });
   }),
 
   // POST /api/transfers
