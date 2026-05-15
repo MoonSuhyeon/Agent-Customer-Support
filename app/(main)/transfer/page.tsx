@@ -6,8 +6,8 @@ interface Props {
 
 export default function TransferPage({ searchParams }: Props) {
   return (
-    <main className="min-h-screen bg-gray-50 flex items-start justify-center py-10 px-4">
+    <div className="flex justify-center">
       <TransferForm defaultFromAccountId={searchParams.fromAccountId} />
-    </main>
+    </div>
   );
 }

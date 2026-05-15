@@ -65,7 +65,7 @@ export default function ConfirmPage() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-50 flex items-start justify-center py-10 px-4">
+    <div className="flex justify-center">
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle>이체 확인</CardTitle>
@@ -133,6 +133,6 @@ export default function ConfirmPage() {
 
         </CardContent>
       </Card>
-    </main>
+    </div>
   );
 }

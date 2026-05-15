@@ -14,7 +14,7 @@ export default function ResultPage({ searchParams }: Props) {
   if (!transferId) redirect("/transfer");
 
   return (
-    <main className="min-h-screen bg-gray-50 flex items-start justify-center py-10 px-4">
+    <div className="flex justify-center">
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <CheckCircle2 className="h-12 w-12 text-green-500 mb-2" />
@@ -38,6 +38,6 @@ export default function ResultPage({ searchParams }: Props) {
           </Button>
         </CardContent>
       </Card>
-    </main>
+    </div>
   );
 }

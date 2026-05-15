@@ -15,7 +15,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (process.env.NODE_ENV !== "development") return;
-    import("@/mocks").then(({ initMocks }) => initMocks().then(() => setReady(true)));
+    import("@/mocks")
+      .then(({ initMocks }) => initMocks())
+      .catch(console.error)
+      .finally(() => setReady(true));
   }, []);
 
   return (
