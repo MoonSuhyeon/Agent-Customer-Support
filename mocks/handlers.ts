@@ -1,5 +1,5 @@
 import { http, HttpResponse } from "msw";
-import type { Account, Transaction, TransferRequest, TransferSuccess, ApiError } from "@/lib/api/types";
+import type { Account, Transaction, TransferRequest, TransferSuccess, ApiError, LoanProduct, MyLoan, LoanApplyRequest, LoanApplyResult } from "@/lib/api/types";
 
 const MOCK_PASSWORD = "1234";
 
@@ -14,6 +14,67 @@ const userProfile = {
 };
 
 const MOCK_TRANSFER_PASSWORD = "1234";
+
+// ──────────────────────────────────────────────
+// 대출 시드 데이터
+// ──────────────────────────────────────────────
+
+const loanProducts: LoanProduct[] = [
+  {
+    productId: "prod-001",
+    productName: "신용대출",
+    description: "신용 등급 기반의 간편 비대면 대출",
+    maxAmount: "50000000",
+    minRate: 3.5,
+    maxRate: 8.5,
+  },
+  {
+    productId: "prod-002",
+    productName: "주택담보대출",
+    description: "주택을 담보로 한 장기 저금리 대출",
+    maxAmount: "500000000",
+    minRate: 2.8,
+    maxRate: 5.5,
+  },
+  {
+    productId: "prod-003",
+    productName: "자동차담보대출",
+    description: "차량을 담보로 한 중금리 실시간 대출",
+    maxAmount: "80000000",
+    minRate: 4.5,
+    maxRate: 9.0,
+  },
+  {
+    productId: "prod-004",
+    productName: "비상금대출",
+    description: "급할 때 즉시 받는 소액 한도 대출",
+    maxAmount: "3000000",
+    minRate: 6.5,
+    maxRate: 15.0,
+  },
+];
+
+const myLoans: MyLoan[] = [
+  {
+    loanId: "loan-001",
+    productName: "신용대출",
+    principalAmount: "20000000",
+    remainingAmount: "15000000",
+    nextPaymentDate: "2026-06-15",
+    interestRate: 4.2,
+    monthlyPayment: "370000",
+    status: "ACTIVE",
+  },
+];
+
+const loanIdempotencyCache = new Map<string, LoanApplyResult>();
+let loanSeq = 1;
+
+function calcMonthly(amount: number, annualRate: number, months: number): number {
+  const r = annualRate / 100 / 12;
+  if (r === 0) return Math.round(amount / months);
+  return Math.round((amount * r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1));
+}
 
 // ──────────────────────────────────────────────
 // 계좌 시드 데이터
@@ -315,6 +376,53 @@ export const handlers = [
       );
     }
     return new HttpResponse(null, { status: 204 });
+  }),
+
+  // GET /api/loans/products
+  http.get("/api/loans/products", () => {
+    return HttpResponse.json(loanProducts);
+  }),
+
+  // GET /api/loans/my
+  http.get("/api/loans/my", () => {
+    return HttpResponse.json(myLoans);
+  }),
+
+  // POST /api/loans/apply
+  http.post("/api/loans/apply", async ({ request }) => {
+    const idempotencyKey = request.headers.get("Idempotency-Key");
+
+    if (idempotencyKey && loanIdempotencyCache.has(idempotencyKey)) {
+      return HttpResponse.json(loanIdempotencyCache.get(idempotencyKey)!);
+    }
+
+    const body = (await request.json()) as LoanApplyRequest;
+    const product = loanProducts.find((p) => p.productId === body.productId);
+
+    if (!product) {
+      return HttpResponse.json(
+        { error: { code: "PRODUCT_NOT_FOUND", message: "대출 상품을 찾을 수 없습니다." } },
+        { status: 404 },
+      );
+    }
+
+    const rate = Math.round(((product.minRate + product.maxRate) / 2) * 10) / 10;
+    const amount = Number(body.amount);
+    const monthly = calcMonthly(amount, rate, body.termMonths);
+
+    const result: LoanApplyResult = {
+      applicationId: `APP-${String(loanSeq++).padStart(6, "0")}`,
+      status: "APPROVED",
+      approvedAmount: body.amount,
+      interestRate: rate,
+      monthlyPayment: String(monthly),
+      termMonths: body.termMonths,
+      productName: product.productName,
+      approvedAt: new Date().toISOString(),
+    };
+
+    if (idempotencyKey) loanIdempotencyCache.set(idempotencyKey, result);
+    return HttpResponse.json(result);
   }),
 
   // POST /api/transfers

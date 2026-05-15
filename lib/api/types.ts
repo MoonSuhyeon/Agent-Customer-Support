@@ -52,3 +52,42 @@ export interface ApiError {
 }
 
 export type TransferResponse = TransferSuccess | ApiError;
+
+export interface LoanProduct {
+  productId: string;
+  productName: string;
+  description: string;
+  maxAmount: string;
+  minRate: number;
+  maxRate: number;
+}
+
+export interface MyLoan {
+  loanId: string;
+  productName: string;
+  principalAmount: string;
+  remainingAmount: string;
+  nextPaymentDate: string;
+  interestRate: number;
+  monthlyPayment: string;
+  status: "ACTIVE" | "COMPLETED";
+}
+
+export interface LoanApplyRequest {
+  productId: string;
+  amount: string;
+  termMonths: number;
+  repaymentType: string;
+  reason?: string;
+}
+
+export interface LoanApplyResult {
+  applicationId: string;
+  status: "APPROVED";
+  approvedAmount: string;
+  interestRate: number;
+  monthlyPayment: string;
+  termMonths: number;
+  productName: string;
+  approvedAt: string;
+}

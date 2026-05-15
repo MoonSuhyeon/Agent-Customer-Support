@@ -1,6 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getAccounts, getAccount, getTransactions, type TransactionParams } from "./accounts";
 import { getProfile, updateProfile, changePassword, changeTransferPassword } from "./settings";
+import { getLoanProducts, getMyLoans, applyLoan } from "./loans";
+import type { LoanApplyRequest } from "./types";
 
 export function useAccounts() {
   return useQuery({
@@ -46,4 +48,25 @@ export function useChangePassword() {
 
 export function useChangeTransferPassword() {
   return useMutation({ mutationFn: changeTransferPassword });
+}
+
+export function useLoanProducts() {
+  return useQuery({
+    queryKey: ["loans", "products"],
+    queryFn: getLoanProducts,
+  });
+}
+
+export function useMyLoans() {
+  return useQuery({
+    queryKey: ["loans", "my"],
+    queryFn: getMyLoans,
+  });
+}
+
+export function useApplyLoan() {
+  return useMutation({
+    mutationFn: ({ body, idempotencyKey }: { body: LoanApplyRequest; idempotencyKey: string }) =>
+      applyLoan(body, idempotencyKey),
+  });
 }
