@@ -7,6 +7,7 @@ import type { TransactionType } from "@/lib/api/types";
 interface Props {
   accountId: string;
   current: TransactionType;
+  basePath?: string;
 }
 
 const TABS: { value: TransactionType; label: string }[] = [
@@ -15,12 +16,13 @@ const TABS: { value: TransactionType; label: string }[] = [
   { value: "WITHDRAWAL", label: "출금" },
 ];
 
-export function TransactionFilter({ accountId, current }: Props) {
+export function TransactionFilter({ accountId, current, basePath }: Props) {
   const router = useRouter();
 
   const handleChange = (value: string) => {
     const params = new URLSearchParams({ type: value, page: "1" });
-    router.replace(`/accounts/${accountId}?${params}`);
+    const base = basePath ?? `/accounts/${accountId}`;
+    router.replace(`${base}?${params}`);
   };
 
   return (

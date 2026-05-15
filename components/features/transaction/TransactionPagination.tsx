@@ -10,16 +10,18 @@ interface Props {
   currentPage: number;
   totalPages: number;
   type: TransactionType;
+  basePath?: string;
 }
 
-export function TransactionPagination({ accountId, currentPage, totalPages, type }: Props) {
+export function TransactionPagination({ accountId, currentPage, totalPages, type, basePath }: Props) {
   const router = useRouter();
 
   if (totalPages <= 1) return null;
 
   const go = (page: number) => {
     const params = new URLSearchParams({ type, page: String(page) });
-    router.replace(`/accounts/${accountId}?${params}`);
+    const base = basePath ?? `/accounts/${accountId}`;
+    router.replace(`${base}?${params}`);
   };
 
   return (
