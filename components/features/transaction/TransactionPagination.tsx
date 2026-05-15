@@ -19,9 +19,12 @@ export function TransactionPagination({ accountId, currentPage, totalPages, type
   if (totalPages <= 1) return null;
 
   const go = (page: number) => {
-    const params = new URLSearchParams({ type, page: String(page) });
     const base = basePath ?? `/accounts/${accountId}`;
-    router.replace(`${base}?${params}`);
+    const [pathname, existingSearch] = base.split("?");
+    const params = new URLSearchParams(existingSearch ?? "");
+    params.set("type", type);
+    params.set("page", String(page));
+    router.replace(`${pathname}?${params}`);
   };
 
   return (

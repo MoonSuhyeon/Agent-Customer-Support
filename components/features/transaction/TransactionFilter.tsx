@@ -20,9 +20,12 @@ export function TransactionFilter({ accountId, current, basePath }: Props) {
   const router = useRouter();
 
   const handleChange = (value: string) => {
-    const params = new URLSearchParams({ type: value, page: "1" });
     const base = basePath ?? `/accounts/${accountId}`;
-    router.replace(`${base}?${params}`);
+    const [pathname, existingSearch] = base.split("?");
+    const params = new URLSearchParams(existingSearch ?? "");
+    params.set("type", value);
+    params.set("page", "1");
+    router.replace(`${pathname}?${params}`);
   };
 
   return (
