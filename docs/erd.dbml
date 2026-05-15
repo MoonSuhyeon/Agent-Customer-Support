@@ -1,0 +1,214 @@
+// ──────────────────────────────────────────────
+// bank-transfer-demo ERD
+// Source: docs/data-snapshot.md
+// Paste into https://dbdiagram.io
+// ──────────────────────────────────────────────
+
+
+// ============ Customer Service ============
+
+Table usr_user {
+  "user_id (사용자 고유 ID)"           varchar(36)  [pk]
+  "user_email (이메일, 로그인 ID)"     varchar(255) [unique, not null]
+  "user_name (이름)"                   varchar(100) [not null]
+  "user_phone (전화번호)"              varchar(20)
+  "user_password_hash (비밀번호 해시)" varchar(255) [not null]
+  "created_at (생성일시)"              timestamptz  [not null]
+  "updated_at (수정일시)"              timestamptz  [not null]
+  "deleted_at (탈퇴일시, soft delete)" timestamptz
+
+  Indexes {
+    "user_email (이메일, 로그인 ID)" [unique, name: 'idx_usr_user_email']
+  }
+}
+
+Table usr_notification_setting {
+  "setting_id (설정 고유 ID)"              varchar(36) [pk]
+  "user_id (사용자 ID, FK)"               varchar(36) [not null]
+  "email_transaction (이메일 거래 알림)"  boolean     [not null, default: true]
+  "email_security (이메일 보안 알림)"     boolean     [not null, default: true]
+  "push_transaction (푸시 거래 알림)"     boolean     [not null, default: false]
+  "push_marketing (마케팅 수신 동의)"     boolean     [not null, default: false]
+  "created_at (생성일시)"                 timestamptz [not null]
+  "updated_at (수정일시)"                 timestamptz [not null]
+
+  Indexes {
+    "user_id (사용자 ID, FK)" [unique, name: 'idx_usr_notif_user_id']
+  }
+}
+
+
+// ============ Deposit Service ============
+
+Table acct_account {
+  "account_id (계좌 고유 ID)"              varchar(36)  [pk]
+  "user_id (소유자 사용자 ID, FK)"         varchar(36)  [not null]
+  "account_no (계좌번호)"                  varchar(20)  [unique, not null]
+  "account_holder (예금주명)"              varchar(100) [not null]
+  "account_type (계좌 유형)"               varchar(20)  [not null]
+  "account_balance (잔액, 원)"             bigint       [not null, default: 0]
+  "account_status (계좌 상태)"             varchar(20)  [not null, default: 'ACTIVE']
+  "opened_at (계좌 개설일시)"              timestamptz  [not null]
+  "created_at (레코드 생성일시)"           timestamptz  [not null]
+  "updated_at (레코드 수정일시)"           timestamptz  [not null]
+  "deleted_at (해지일시, soft delete)"     timestamptz
+
+  Indexes {
+    "user_id (소유자 사용자 ID, FK)" [name: 'idx_acct_account_user_id']
+    "account_no (계좌번호)"          [unique, name: 'idx_acct_account_no']
+  }
+}
+
+Table txn_transaction {
+  "transaction_id (거래 고유 ID)"       varchar(36)  [pk]
+  "account_id (거래 계좌 ID, FK)"       varchar(36)  [not null]
+  "transfer_id (연관 이체 ID, FK)"      varchar(36)
+  "transaction_type (거래 유형)"        varchar(20)  [not null]
+  "transaction_amount (거래 금액, 원)"  bigint       [not null]
+  "transaction_memo (거래 메모)"        varchar(200)
+  "counterparty_name (거래 상대방)"     varchar(100)
+  "balance_after (거래 후 잔액, 원)"    bigint       [not null]
+  "transaction_at (거래 발생일시)"      timestamptz  [not null]
+  "created_at (레코드 생성일시)"        timestamptz  [not null]
+
+  Indexes {
+    "account_id (거래 계좌 ID, FK)"  [name: 'idx_txn_account_id']
+    "transaction_at (거래 발생일시)" [name: 'idx_txn_at']
+    "transfer_id (연관 이체 ID, FK)" [name: 'idx_txn_transfer_id']
+  }
+}
+
+
+// ============ Transfer Service ============
+
+Table tfr_transfer {
+  "transfer_id (이체 고유 ID)"              varchar(36) [pk]
+  "user_id (이체 요청자 사용자 ID, FK)"     varchar(36) [not null]
+  "from_account_id (출금 계좌 ID, FK)"      varchar(36) [not null]
+  "to_account_no (입금 계좌번호)"           varchar(20) [not null]
+  "to_account_id (입금 계좌 ID, FK)"        varchar(36)
+  "transfer_amount (이체 금액, 원)"         bigint      [not null]
+  "transfer_memo (이체 메모)"               varchar(200)
+  "transfer_status (이체 상태)"             varchar(20) [not null]
+  "idempotency_key (중복 방지 키)"          varchar(36) [unique]
+  "completed_at (이체 완료일시)"            timestamptz
+  "created_at (생성일시)"                   timestamptz [not null]
+  "updated_at (수정일시)"                   timestamptz [not null]
+
+  Indexes {
+    "user_id (이체 요청자 사용자 ID, FK)" [name: 'idx_tfr_user_id']
+    "from_account_id (출금 계좌 ID, FK)"  [name: 'idx_tfr_from_account']
+    "to_account_no (입금 계좌번호)"       [name: 'idx_tfr_to_account_no']
+    "idempotency_key (중복 방지 키)"      [unique, name: 'idx_tfr_idempotency']
+    "created_at (생성일시)"               [name: 'idx_tfr_created_at']
+  }
+}
+
+
+// ============ Loan Service ============
+
+Table loan_product {
+  "product_id (상품 고유 ID)"           varchar(36)  [pk]
+  "product_name (상품명)"               varchar(100) [not null]
+  "product_description (상품 설명)"     varchar(500)
+  "max_amount (최대 대출 한도, 원)"     bigint       [not null]
+  "min_rate (최저 금리, 연%)"           decimal(5,2) [not null]
+  "max_rate (최고 금리, 연%)"           decimal(5,2) [not null]
+  "is_active (판매 중 여부)"            boolean      [not null, default: true]
+  "created_at (생성일시)"               timestamptz  [not null]
+  "updated_at (수정일시)"               timestamptz  [not null]
+  "deleted_at (삭제일시, soft delete)"  timestamptz
+}
+
+Table loan_loan {
+  "loan_id (대출 고유 ID)"                  varchar(36)  [pk]
+  "user_id (대출자 사용자 ID, FK)"          varchar(36)  [not null]
+  "product_id (대출 상품 ID, FK)"           varchar(36)  [not null]
+  "account_id (대출금 입금 계좌 ID, FK)"   varchar(36)
+  "principal_amount (대출 원금, 원)"        bigint       [not null]
+  "remaining_amount (잔여 원금, 원)"        bigint       [not null]
+  "interest_rate (적용 금리, 연%)"          decimal(5,2) [not null]
+  "monthly_payment (월 상환액, 원)"         bigint       [not null]
+  "term_months (대출 기간, 개월)"           int          [not null]
+  "repayment_type (상환 방식)"              varchar(30)  [not null]
+  "loan_status (대출 상태)"                 varchar(20)  [not null]
+  "next_payment_date (다음 상환일)"         date
+  "started_at (대출 실행일시)"              timestamptz  [not null]
+  "ended_at (대출 종료일시)"                timestamptz
+  "created_at (생성일시)"                   timestamptz  [not null]
+  "updated_at (수정일시)"                   timestamptz  [not null]
+  "deleted_at (삭제일시, soft delete)"      timestamptz
+
+  Indexes {
+    "user_id (대출자 사용자 ID, FK)" [name: 'idx_loan_loan_user_id']
+    "product_id (대출 상품 ID, FK)"  [name: 'idx_loan_loan_product_id']
+    "loan_status (대출 상태)"        [name: 'idx_loan_loan_status']
+  }
+}
+
+Table loan_application {
+  "application_id (신청 고유 ID)"           varchar(36)  [pk]
+  "user_id (신청자 사용자 ID, FK)"          varchar(36)  [not null]
+  "product_id (신청 상품 ID, FK)"           varchar(36)  [not null]
+  "loan_id (승인 후 생성된 대출 ID, FK)"    varchar(36)
+  "requested_amount (신청 금액, 원)"        bigint       [not null]
+  "approved_amount (승인 금액, 원)"         bigint
+  "interest_rate (확정 금리, 연%)"          decimal(5,2)
+  "monthly_payment (월 상환액, 원)"         bigint
+  "term_months (신청 기간, 개월)"           int          [not null]
+  "repayment_type (상환 방식)"              varchar(30)  [not null]
+  "application_reason (신청 사유)"          varchar(500)
+  "application_status (심사 상태)"          varchar(20)  [not null]
+  "idempotency_key (중복 방지 키)"          varchar(36)  [unique]
+  "approved_at (승인일시)"                  timestamptz
+  "created_at (신청일시)"                   timestamptz  [not null]
+  "updated_at (수정일시)"                   timestamptz  [not null]
+
+  Indexes {
+    "user_id (신청자 사용자 ID, FK)"  [name: 'idx_loan_app_user_id']
+    "product_id (신청 상품 ID, FK)"   [name: 'idx_loan_app_product_id']
+    "application_status (심사 상태)"  [name: 'idx_loan_app_status']
+    "idempotency_key (중복 방지 키)"  [unique, name: 'idx_loan_app_idempotency']
+    "created_at (신청일시)"           [name: 'idx_loan_app_created_at']
+  }
+}
+
+
+// ============ References ============
+
+Ref: "usr_notification_setting"."user_id (사용자 ID, FK)"             > "usr_user"."user_id (사용자 고유 ID)"
+Ref: "acct_account"."user_id (소유자 사용자 ID, FK)"                  > "usr_user"."user_id (사용자 고유 ID)"
+Ref: "tfr_transfer"."user_id (이체 요청자 사용자 ID, FK)"             > "usr_user"."user_id (사용자 고유 ID)"
+Ref: "tfr_transfer"."from_account_id (출금 계좌 ID, FK)"              > "acct_account"."account_id (계좌 고유 ID)"
+Ref: "tfr_transfer"."to_account_id (입금 계좌 ID, FK)"                > "acct_account"."account_id (계좌 고유 ID)"
+Ref: "txn_transaction"."account_id (거래 계좌 ID, FK)"                > "acct_account"."account_id (계좌 고유 ID)"
+Ref: "txn_transaction"."transfer_id (연관 이체 ID, FK)"               > "tfr_transfer"."transfer_id (이체 고유 ID)"
+Ref: "loan_loan"."user_id (대출자 사용자 ID, FK)"                     > "usr_user"."user_id (사용자 고유 ID)"
+Ref: "loan_loan"."product_id (대출 상품 ID, FK)"                      > "loan_product"."product_id (상품 고유 ID)"
+Ref: "loan_loan"."account_id (대출금 입금 계좌 ID, FK)"               > "acct_account"."account_id (계좌 고유 ID)"
+Ref: "loan_application"."user_id (신청자 사용자 ID, FK)"              > "usr_user"."user_id (사용자 고유 ID)"
+Ref: "loan_application"."product_id (신청 상품 ID, FK)"               > "loan_product"."product_id (상품 고유 ID)"
+Ref: "loan_application"."loan_id (승인 후 생성된 대출 ID, FK)"        > "loan_loan"."loan_id (대출 고유 ID)"
+
+
+// ============ Table Groups ============
+
+TableGroup "Customer Service" {
+  usr_user
+  usr_notification_setting
+}
+
+TableGroup "Deposit Service" {
+  acct_account
+  txn_transaction
+}
+
+TableGroup "Transfer Service" {
+  tfr_transfer
+}
+
+TableGroup "Loan Service" {
+  loan_product
+  loan_loan
+  loan_application
+}
