@@ -33,9 +33,14 @@ export default function ResultPage({ searchParams }: Props) {
             </div>
           </dl>
 
-          <Button asChild className="w-full">
-            <Link href="/transfer">새 이체</Link>
-          </Button>
+          <div className="flex flex-col gap-2">
+            <Button asChild className="w-full">
+              <Link href="/transfer">새 이체</Link>
+            </Button>
+            <Button asChild variant="outline" className="w-full">
+              <Link href="/dashboard">대시보드로 돌아가기</Link>
+            </Button>
+          </div>
         </CardContent>
       </Card>
     </div>
