@@ -45,9 +45,13 @@ class ReadTools:
 
     risk = Risk.LOW
 
-    def __init__(self, store: Store, today: date | None = None):
+    def __init__(self, store: Store, today: date | None = None,
+                 policy_retriever=None):
         self.store = store
         self.today = today or date.today()
+        # 정책 조회는 RAG-Marketing 의 검색 코어를 재사용한다.
+        # 주입하지 않으면 지연 생성한다(색인 비용을 필요할 때만 낸다).
+        self._policy_retriever = policy_retriever
 
     def get_booking(self, booking_id: str) -> ToolResult:
         b = self.store.get_booking(booking_id)
@@ -68,15 +72,28 @@ class ReadTools:
         return ToolResult(True, {"property_id": p.property_id, "name": p.name,
                                  "region": p.region})
 
+    @property
+    def policy_retriever(self):
+        if self._policy_retriever is None:
+            from app.agent.policy_rag import PolicyRetriever
+            self._policy_retriever = PolicyRetriever(self.store)
+        return self._policy_retriever
+
     def get_cancellation_policy(self, property_id: str) -> ToolResult:
-        """정책 조회. **실패하면 추측하지 않는다.**"""
-        pol = self.store.get_policy(property_id)
-        if pol is None:
-            return ToolResult(False, {}, f"숙소 {property_id} 의 취소 정책을 찾을 수 없다")
+        """정책 조회 — 문서 검색으로 찾는다. **근거가 약하면 추측하지 않고 실패한다.**
+
+        검색은 언제나 무언가를 돌려주므로, 돌려준 것을 근거로 써도 되는지
+        따로 판정한다. 기권하면 그래프가 에스컬레이션으로 빠진다.
+        """
+        found = self.policy_retriever.lookup(property_id)
+        if not found:
+            return ToolResult(False, {}, found.reason)
+        pol = found.policy
         return ToolResult(True, {
             "policy_id": pol.policy_id, "name": pol.name,
             "description": pol.describe(),
             "tiers": pol.tiers,
+            "retrieval_score": round(found.top_score, 6),
         })
 
     def calculate_refund(self, booking_id: str) -> ToolResult:
@@ -84,9 +101,11 @@ class ReadTools:
         b = self.store.get_booking(booking_id)
         if b is None:
             return ToolResult(False, {}, f"예약 {booking_id} 을 찾을 수 없다")
-        pol = self.store.get_policy(b.property_id)
-        if pol is None:
-            return ToolResult(False, {}, "취소 정책을 확인할 수 없어 환불 금액을 계산할 수 없다")
+        found = self.policy_retriever.lookup(b.property_id)
+        if not found:
+            return ToolResult(False, {},
+                              f"취소 정책을 확인할 수 없어 환불 금액을 계산할 수 없다 ({found.reason})")
+        pol = found.policy
 
         days = b.days_until_check_in(self.today)
         ratio = pol.refund_ratio(days)

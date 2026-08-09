@@ -1,0 +1,10 @@
+fastapi>=0.115
+uvicorn>=0.34
+pydantic>=2.9
+langgraph>=0.3
+pytest>=8.0
+pytest-asyncio>=0.24
+
+# 정책 문서 검색 코어 — RAG-Marketing 저장소에서 재사용한다.
+# 두 시스템이 같은 검색 구현을 공유하며, 중복 구현하지 않는다.
+marketplace-retrieval @ git+https://github.com/MoonSuhyeon/RAG-Marketing.git

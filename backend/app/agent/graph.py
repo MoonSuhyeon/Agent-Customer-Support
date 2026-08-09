@@ -67,8 +67,13 @@ def extract_booking_id(message: str) -> str | None:
 
 
 # --------------------------------------------------------------------- 노드
-def build_graph(store: Store, today: date | None = None, checkpointer=None):
-    read = ReadTools(store, today=today)
+def build_graph(store: Store, today: date | None = None, checkpointer=None,
+                policy_retriever=None):
+    # 정책 검색 색인은 그래프당 한 번만 만든다
+    if policy_retriever is None:
+        from app.agent.policy_rag import PolicyRetriever
+        policy_retriever = PolicyRetriever(store)
+    read = ReadTools(store, today=today, policy_retriever=policy_retriever)
     write = WriteTools(store)
 
     def n_intent(s: AgentState) -> dict:
