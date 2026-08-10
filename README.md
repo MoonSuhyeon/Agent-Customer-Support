@@ -1,596 +1,206 @@
-# Agent-Customer-Support
+# A Support Agent That Stops Before It Touches Money
 
-> Airbnb형 숙박 플랫폼의 **예약·취소·환불·숙소 이용 문의를 자동화하는 AI Agent 시스템**
+*Personal project*
 
-고객 문의에 답변만 하는 챗봇이 아니라, 요청을 업무 단위로 분해하고
-숙소·예약·정책 데이터를 조회하여 **실제 취소·환불 처리까지 수행하는 Agent**입니다.
+Most support questions are lookups. **Cancellation and refund are not** — they
+move money and change booking state, and the guest is usually asking the day
+before check-in, when the refund tier is about to change.
+
+That makes automation attractive and dangerous at the same time. A chatbot that
+answers wrongly produces a bad reply. An agent that acts wrongly produces a
+double refund, or a booking that is cancelled while the money never came back.
+Retries and double-clicks make both of those routine failure modes rather than
+edge cases.
+
+So the design question is not "how smart is the model" but **"how much can be
+automated when being wrong costs real money, and what happens the moment it is
+wrong?"**
+
+I built an agent that **halts before every state change and waits for the
+customer, blocks duplicate execution at the database constraint rather than in
+application logic, rolls back cancellation when the refund fails, re-reads state
+after acting to confirm what it told the customer, and escalates instead of
+guessing whenever the policy cannot be confirmed.**
+
+Policy lookup reuses the retrieval core from
+[RAG-Marketing](https://github.com/MoonSuhyeon/RAG-Marketing). Search always
+returns *something*, so that core also carries an abstain path — otherwise
+attaching retrieval would have quietly broken the no-guessing rule.
 
 ---
 
-## 1. Architecture
+## Architecture
 
-```text
-        [ Next.js ] Support UI                    🔨
-                  │  SSE
-                  ↓
-        [ FastAPI ] Agent API                     🆕
-          POST /support/messages
-          GET  /support/sessions/{id}
-          POST /support/confirm      (HITL)
-                  │
-                  ↓
-        [ LangGraph ] Agent Orchestrator          🆕
-          ┌──────────────────────────────┐
-          │  intent      의도 분석         │
-          │  plan        업무 분해         │
-          │  retrieve    조회 Tool 실행    │
-          │  decide      조건 판단         │
-          │  confirm     고객 확인 (중단)  │
-          │  execute     상태 변경 Tool    │
-          │  verify      결과 검증         │
-          │  respond     응답 생성         │
-          │  escalate    상담원 이관       │
-          └──────────────────────────────┘
-                  │
-        ┌─────────┼──────────┐
-        ↓         ↓          ↓
-    Read Tools  Policy RAG  Write Tools
-        │           │           │
-        ↓           ↓           ↓
-   PostgreSQL   FAISS       PostgreSQL
-   (예약/숙소)  (정책 문서)  (트랜잭션)
+```
+              ┌────────────────────────────────────────────────┐
+              │            SUPPORT UI  (Next.js)               │
+              │      request  →  confirm  →  result            │
+              │  amount and policy shown before approval       │
+              └───────────────────────┬────────────────────────┘
+                                      │  SSE
+                                      ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │                    AGENT API  (FastAPI)                  │
+        │                                                          │
+        │  POST /support/messages      start or continue           │
+        │  POST /support/confirm       customer approval  ← gate   │
+        │  GET  /support/sessions/{id} state and full trace        │
+        │                                                          │
+        │  confirm is a separate endpoint because the graph        │
+        │  is suspended, not because the UI needs two screens      │
+        └───────────────────────────┬──────────────────────────────┘
+                                    │
+                                    ▼
+    ┌──────────────────────────────────────────────────────────────────┐
+    │                    LANGGRAPH ORCHESTRATOR                        │
+    │                                                                  │
+    │    intent ──▶ plan ──▶ retrieve ──▶ decide                       │
+    │      │                    │            │                         │
+    │      │ unclear            │ missing    │ already cancelled       │
+    │      ▼                    ▼            ▼                         │
+    │   escalate            escalate      respond                      │
+    │                                        ▲                         │
+    │                            confirm ⏸───┘  interrupt_before       │
+    │                               │                                  │
+    │                    ═══════════╪═══════════  customer approval    │
+    │                               │                                  │
+    │                            execute ──▶ verify ──▶ respond        │
+    │                               │           │                      │
+    │                               ▼           ▼                      │
+    │                          escalate     escalate                   │
+    │                                                                  │
+    │  CHECKPOINTER (PostgreSQL)                                       │
+    │  the graph can sit at confirm for days and still resume          │
+    │  state lives in the store, so API instances scale out            │
+    └──────────────────────┬───────────────────────┬───────────────────┘
+                           │                       │
+                           ▼                       ▼
+    ┌────────────────────────────────┐  ┌────────────────────────────────┐
+    │        READ TOOLS   LOW        │  │       WRITE TOOLS   HIGH       │
+    │        auto-executed           │  │    customer approval required  │
+    │                                │  │                                │
+    │  get_booking                   │  │  cancel_and_refund             │
+    │  get_property                  │  │                                │
+    │  get_cancellation_policy ──┐   │  │  1 claim idempotency key       │
+    │  calculate_refund   MEDIUM │   │  │  2 cancel booking              │
+    │    advisory only           │   │  │  3 refund via PG               │
+    └────────────────────────────┼───┘  │  4 on failure → restore        │
+                                 │      │  5 on restore failure →        │
+                                 │      │       needs_human, stop        │
+                                 │      └───────────────┬────────────────┘
+                                 ▼                      │
+    ┌────────────────────────────────────────────┐      │
+    │      POLICY RETRIEVAL                      │      │
+    │      retrieval  (shared package)           │      │
+    │                                            │      │
+    │  policy docs indexed per property          │      │
+    │  properties without a policy are NOT       │      │
+    │  indexed — an index entry would become     │      │
+    │  a guess                                   │      │
+    │                                            │      │
+    │  metadata filter → dense + BM25 → RRF      │      │
+    │            ↓                               │      │
+    │  assess(hits, min_score, min_margin)       │      │
+    │            ↓                               │      │
+    │    ┌──────────────┬──────────────────┐     │      │
+    │    │ grounded     │ abstain          │     │      │
+    │    │ use policy   │ tool fails →     │     │      │
+    │    │              │ escalate         │     │      │
+    │    └──────────────┴──────────────────┘     │      │
+    └────────────────────────────────────────────┘      │
+                                                        ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │                        STORE                             │
+        │                                                          │
+        │  Booking · Property · CancellationPolicy                 │
+        │                                                          │
+        │  IDEMPOTENCY TABLE   UNIQUE(key)                         │
+        │    second identical request replays the stored result    │
+        │    the race cannot form, because it is not a read-       │
+        │    then-write in application code                        │
+        │                                                          │
+        │  AUDIT LOG   every write tool call, with amount          │
+        └──────────────────────────────────────────────────────────┘
+
+        ┌──────────────────────────────────────────────────────────┐
+        │                    EVALUATION HARNESS                    │
+        │                                                          │
+        │  scenarios   normal · boundary · exception               │
+        │  expected outcome declared per scenario, then compared   │
+        │                                                          │
+        │  misinformation rate is the release gate — automation    │
+        │  rate is only meaningful while it stays at zero          │
+        └──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Implementation
+## Results
 
-LangGraph 그래프가 업무를 단계로 쪼개고, 상태를 바꾸는 지점에서 멈춘다.
+| | |
+|---|---|
+| Scenarios | **8/8** — normal, boundary, exception |
+| **Misinformation rate** | **0.0%** |
+| Duplicate request | refund executes **once** |
+| PG failure | booking restored to `CONFIRMED`, escalated |
+| Compensation failure | `needs_human`, partial state left visible |
+| Policy not indexed | abstains — no similar policy substituted |
+| Tests | **33** |
 
-| 노드 | 역할 | 핵심 |
-|------|------|------|
-| `intent` · `plan` | 의도 분석 · 업무 분해 | 복합 요청을 작업 단위로 |
-| `retrieve` | 조회 Tool 실행 | 예약·숙소·고객·정책. 정책은 RAG 검색 |
-| `decide` | 조건 판단 | 취소 가능 여부, 환불 금액 계산 |
-| `confirm` | **그래프 중단** | 고객 확인 대기. Checkpointer가 상태를 보존 |
-| `execute` | 상태 변경 Tool | 멱등성 키 필수. 취소+환불은 함께 |
-| `verify` | 결과 검증 | 실행 후 상태를 **다시 읽어** 안내 내용과 대조 |
-| `escalate` | 상담원 이관 | 판단 불가·검증 실패·**정책 근거 부족** |
+Refund amounts follow the policy tier, not a heuristic: a booking ten days out
+under a flexible policy returns 240,000원 in full; the same request one day
+before check-in returns 36,000원, which is the 20% tier.
 
-정책 조회는 **RAG-Marketing 의 검색 코어(`marketplace-retrieval`)를 그대로 재사용**한다.
-검색 스택을 새로 들이지 않았고, 두 저장소가 같은 구현을 공유한다.
+**A real bug surfaced here.** The idempotency record was stored as
+`{"status": "DONE", **result}` — and `result` also carried a `status`
+(`"CANCELLED"`), which overwrote the record state. Retries were then judged
+"still in progress" and the replay path never fired. It was caught only because
+a test called the write tool twice. Idempotency does not fail visibly; it fails
+the second time.
 
-다만 그대로 붙이면 안전 속성이 깨진다. **검색은 언제나 무언가를 돌려주기 때문이다.**
-정책이 없는 숙소에 비슷한 다른 규정이 걸리면, 잘못된 환불 금액을 고객에게 안내하게 된다.
-그래서 검색 결과를 근거로 써도 되는지 따로 판정하는 **기권(abstain) 경로**를 넣었다.
+**Adding retrieval did not weaken the guarantees.**
+`get_cancellation_policy` moved from a dictionary lookup to hybrid document
+search, and all 18 pre-existing tests still passed unchanged — including the one
+that requires escalation when a policy is missing. The safety contract was
+written against behavior, not implementation.
 
-```text
-정책 문서 검색 (메타데이터로 해당 숙소 한정)
-        ↓
-assess(hits, min_score, min_margin)
-        ↓
-┌─────────────────────┬──────────────────────────┐
-│ 근거 충분            │ 기권                      │
-│ 정책으로 금액 계산    │ 도구 실패 → escalate      │
-└─────────────────────┴──────────────────────────┘
+Escalation runs at 3/8. Lowering that is not the goal; **raising automation
+while misinformation stays at 0% is.** When the policy cannot be confirmed,
+escalating is the correct answer.
+
+## Stack
+
+| | |
+|---|---|
+| Language | Python 3.11 |
+| Orchestration | LangGraph — interrupt + checkpointer |
+| API | FastAPI · Pydantic v2 · SSE |
+| Retrieval | `marketplace-retrieval` (from RAG-Marketing) |
+| Storage | PostgreSQL (domain + graph checkpoints) |
+| Frontend | Next.js 14 · TypeScript · Tailwind · shadcn/ui |
+| Testing | pytest — 33 tests |
+
+Runs without an API key. Intent classification defaults to deterministic rules —
+in a path where a wrong classification costs money, the rule is the baseline and
+the LLM is the substitutable part.
+
+## Run locally
+
+```bash
+pip install -r backend/requirements.txt
+cd backend
+pytest                          # 33 tests
+python scripts/run_agent_demo.py
+
+uvicorn app.main:app --reload   # /docs
 ```
 
-정책이 등록되지 않은 숙소는 **애초에 색인하지 않는다.** 색인해두면 검색이 무언가를
-돌려주게 되고, 그게 곧 추측이 된다.
-
-### Failure handling
-
-이 프로젝트의 중심이다. 자동화율보다 **잘못 실행하지 않는 것**이 우선이다.
-
-```text
-LLM 실패 (타임아웃 · 파싱 실패 · 스키마 불일치)
-    ↓ retry — 지수 백오프, 구조화 출력 스키마로 재요청
-정보 부족 (정책 조회 실패 · 데이터 불일치)
-    ↓ validation — 자동 실행 중단. 추측 답변 금지
-실행 실패 (환불 거절 · 외부 PG 오류)
-    ↓ fallback — Saga 보상으로 취소 롤백
-    ↓ 롤백 불가 시 상태를 그대로 두고 즉시 이관
-검증 실패 (안내 금액 ≠ 실제 처리 금액)
-    ↓ human review — 상담원 확인 대기 큐로
-분쟁 · 판단 불가
-    ↓ human review — 처음부터 사람에게
-```
-
-**Silent Fallback 금지.** "일반적으로 7일 전까지는 전액 환불됩니다" 같은 추측을 만들지 않고, 확인하지 못했다고 말한 뒤 넘긴다.
-
----
-
-## 3. Evaluation
-
-> Phase 0~10 구현 완료. 아래는 **실제 측정값**이다.
-> 재현: `python backend/scripts/run_agent_demo.py` · 검증: `pytest` (33 tests)
-> API 키 없이 동작한다 — 의도 분류는 규칙 기반이 기본값이고, LLM 은 교체 가능한 백엔드다.
-
-### 시나리오 회귀 — 정상 · 경계 · 예외
-
-| 구분 | 시나리오 | 결과 |
-|------|----------|------|
-| 정상 | 전액 환불 취소 (B1002) | 중단 → 승인 → CANCELLED, 240,000원 환불 |
-| 정상 | 예약 조회 | 상태 변경 없이 응답 |
-| 경계 | **고객이 승인하지 않음** | 확인 대기에서 멈춤, 예약 CONFIRMED 유지 |
-| 경계 | 임박 취소 (내일 체크인) | 정책대로 20% = 36,000원 환불 |
-| 경계 | 환불 불가 구간 | 0원 환불로 정확히 안내 후 취소 |
-| 예외 | 정책 미등록 숙소 | **추측하지 않고 이관** |
-| 예외 | 존재하지 않는 예약 | 이관 |
-| 예외 | 의도 불명 | 이관 |
-
-| 지표 | 측정값 | 목표 |
-|------|--------|------|
-| 시나리오 통과 | **8/8** | 8/8 |
-| **오응대율** | **0.0%** | 0% |
-| 자동 완결 | 5/8 | — |
-| 상담원 이관 | 3/8 | — |
-
-이관율 3/8 을 낮추는 것이 목표가 아니다. **오응대율 0% 를 지킨 상태에서** 자동화율을
-올리는 것이 목표다. 정책을 모르면 이관하는 편이 옳다.
-
-### 안전장치 검증
-
-| 장치 | 검증 방법 | 결과 |
-|------|-----------|------|
-| **HITL 게이트** | 그래프가 `execute` 직전에서 멈추는지 | `next == ("execute",)`, 예약 CONFIRMED 유지 |
-| | confirm 없이 execute 에 닿는 경로 | 트레이스에 `execute` 없음 |
-| **멱등성** | 같은 키로 쓰기 도구 2회 호출 | 환불 실행 **1회**, 두 번째는 저장된 결과 재생 |
-| **보상 트랜잭션** | 외부 PG 실패 주입 | 예약이 `CONFIRMED` 로 롤백 + 이관 |
-| **보상 실패** | 보상까지 실패 주입 | `needs_human=True` 로 사람에게 이관 |
-| **Silent Fallback 금지** | 정책 조회 실패 | 추측 문구 없음, 이관 사유 명시 |
-| **Verify** | 실행 후 상태 재조회 | 안내 금액과 실제 환불액 대조 |
-
-### 실제로 잡은 버그
-
-멱등성 구현에서 저장 레코드가 `{"status": "DONE", **result}` 였는데, `result` 에도
-`status`(= `"CANCELLED"`) 가 있어 **레코드 상태가 덮어써졌다.** 그 결과 재시도가
-"처리 중"으로 잘못 판정됐다. 테스트가 이것을 잡아냈고, 결과를 펼쳐 담지 않고
-감싸도록 고쳤다. 멱등성은 **두 번 호출해보지 않으면 깨진 줄 모른다.**
-
-### API 동작
-
-```text
-POST /support/messages   → awaiting_confirmation=true, 예약 상태 CONFIRMED
-POST /support/confirm    → verified=true, 예약 상태 CANCELLED
-POST /support/confirm    → HTTP 409 "확인 대기 중인 요청이 없습니다"
-GET  /support/sessions/{id}
-  trace: intent → plan → retrieve → decide → confirm → execute → verify → respond
-```
-
-Checkpointer 가 상태를 들고 있으므로 **문의와 승인 사이에 시간이 얼마나 지나도** 세션이 살아 있다.
-
-### Phase 8 — 정책 RAG 연결
-
-| 검증 | 결과 |
-|------|------|
-| 정책 미등록 숙소 조회 | **기권** — 비슷한 다른 규정을 가져오지 않는다 |
-| 임계값을 올렸을 때 | 근거 부족으로 기권 (자동화율 ↔ 오응대 위험의 손잡이) |
-| 1·2위 점수 격차 부족 | 기권 — 어느 것이 답인지 모른다는 뜻 |
-| 검색으로 찾은 정책의 금액 계산 | FLEX·체크인 10일 전 → 240,000원 전액 |
-| 기권이 그래프까지 전파 | `escalated=True`, 예약 상태 변경 없음 |
-
-**검색을 붙인 뒤에도 시나리오 8/8 · 오응대율 0% 가 유지된다.**
-`get_cancellation_policy` 가 dict 조회에서 문서 검색으로 바뀌었지만
-기존 18개 테스트가 그대로 통과한다 — 안전 속성이 구현 방식과 분리되어 있다는 뜻이다.
-
-### 남은 목표치
-
-| 항목 | 목표 | 상태 |
-|------|------|------|
-| 단순 조회 P95 | < 3초 | LLM 백엔드 연결 후 |
-| Tool 호출 정확도 | 측정 후 기준 확정 | LLM 백엔드 연결 후 |
-| Token cost / 건 | 상담원 처리 원가와 비교 | LLM 백엔드 연결 후 |
-
----
-
-## 4. Engineering Decisions
-
-| 결정 | 채택 | 이유와 대안 |
-|------|------|-------------|
-| 오케스트레이션 | **LangGraph** | 상태 머신을 직접 짜면 중단·재개와 분기 이력을 전부 구현해야 한다. HITL이 핵심 요구사항이라 **중단이 프레임워크 기본기**여야 한다 |
-| 상태 보관 | **PostgreSQL Checkpointer** | 고객이 확인 버튼을 며칠 뒤 누를 수 있다. 인메모리로는 세션이 살아남지 못한다 |
-| Tool 설계 | **Read / Write 분리** | 권한·감사·승인 게이트를 **도구 단위**로 건다. 하나가 조회와 변경을 겸하면 통제 지점이 사라진다 |
-| 중복 방지 | **DB UNIQUE 멱등성 키** | "이미 처리됐나?" 조회 후 실행하면 그 사이 두 번째 요청이 끼어든다. 제약은 경합을 성립시키지 않는다 |
-| 취소 + 환불 | **같은 트랜잭션, 외부 PG는 Saga** | 부분 처리 상태로 방치하면 사람이 수습해야 한다 |
-| 정책 조회 | **RAG-Marketing 엔진 재사용** | 정책 검색을 위해 별도 검색 스택을 새로 들일 이유가 없다 |
-| 출력 | **구조화 출력(Pydantic)** | 자연어 파싱은 실패 지점을 숨긴다. 스키마 불일치는 즉시 재시도 대상이 된다 |
-
-### Trade-offs
-
-| 얻은 것 | 포기한 것 |
-|---------|-----------|
-| 잘못된 취소·환불이 실행되지 않는다 | 확인 게이트 때문에 **완전 자동화율에 상한**이 생긴다 |
-| 중단·재개와 분기 이력을 얻는다 | **프레임워크 의존**과 그래프 디버깅 학습 비용 |
-| 도구 단위로 권한·감사를 건다 | 호출 수가 늘어 **지연이 증가**한다 |
-| 중복 실행이 원천 차단된다 | 멱등성 키를 **모든 쓰기 경로에 강제**해야 한다 |
-| 부분 처리 상태가 남지 않는다 | 보상 트랜잭션이라 **최종 일관성**이다 |
-| 근거 없는 답변을 하지 않는다 | 정책 검색 품질이 곧 **자동화율의 상한**이 된다 |
-
----
-
-## 5. Operations
-
-> 테스트·배포·관측은 구현과 함께 붙인다. 아래는 **적용할 구성**이며, 현재 구축된 항목은 ✅로 표시했다.
-
-### Testing
-
-시나리오 회귀 테스트셋이 이 프로젝트의 안전망이다.
-
-| 대상 | 검증 내용 |
-|------|-----------|
-| **시나리오 회귀** | 정상 · 경계 · 예외 각 N건. 그래프·프롬프트 변경마다 전체 실행 |
-| **멱등성** | 같은 취소 요청 2회 → 환불 실행 1회 |
-| **HITL 게이트** | 고객 확인 없이 Write Tool이 실행되는 경로가 존재하지 않는지 |
-| **Saga 롤백** | 환불 실패 시 예약 취소가 되돌려지는지, 불가 시 에스컬레이션되는지 |
-| Tool 계약 | 각 Tool의 입출력이 Pydantic 스키마를 지키는지 |
-| Silent Fallback | 정책 조회 실패 시 추측 답변이 나오지 않는지 |
-
-### CI/CD
-
-```text
-push → ruff · black
-     → pytest
-     → 시나리오 평가 실행
-     → 품질 게이트            오응대율 0% 미달 시 배포 차단
-     → docker build
-```
-
-**오응대율을 배포 조건으로 건다.** 자동화율이 올라가도 오응대가 생기면 배포하지 않는다.
-
-### Container
-
-`Dockerfile`(FastAPI + LangGraph) + `docker-compose.yml`(PostgreSQL · Agent API · Next.js).
-Checkpointer가 PostgreSQL이라 컨테이너가 재시작돼도 대기 중인 세션이 살아남는다.
-
-### Observability
-
-| 항목 | 노출 |
-|------|------|
-| 노드별 지연 | LangGraph 각 노드 span |
-| Tool 호출 | 도구명 · 인자 · 성공 여부 (Write Tool은 전량 감사 로그) |
-| 확인 대기 | HITL 큐에 머문 시간 |
-| **에스컬레이션 사유** | 정보 부족 · 검증 실패 · 분쟁 등으로 분류 |
-| 토큰·비용 | 문의 1건당 처리 비용 |
-
-### Scalability
-
-병목은 **LLM 호출 지연과 비용**이다. 동시 세션 수가 아니다.
-
-- 1차: 조회 결과 캐시, 의도 분류를 경량 모델로 분리
-- 2차: 조회 Tool 병렬 실행 (asyncio)
-- 동시성: Checkpointer가 DB에 있어 **API 인스턴스는 수평 확장 가능**하다. 상태를 프로세스에 두지 않은 이유가 여기에 있다
-
----
-
-## 문서 성격
-
-이 문서는 **구현 명세(Spec)** 입니다. 완성된 결과물이 아니라 만들어 가는 목표 상태를 기술합니다.
-각 항목의 진행 상태는 다음 표기로 구분합니다.
-
-| 표기 | 의미 |
-|------|------|
-| ✅ | 구현 완료 |
-| 🔨 | 진행 중 |
-| 🆕 | 예정 |
-
-현재는 Next.js 기반 클라이언트가 구현되어 있고, **Python / FastAPI / LangGraph 기반 Agent 백엔드**가 이 명세의 주 구현 대상입니다.
-
----
-
-## 목적
-
-```text
-고객 문의
-   ↓
-의도 분석 · 업무 단위 분해
-   ↓
-숙소 / 예약 / 정책 조회
-   ↓
-조건 판단 (취소 가능 여부 · 환불 금액)
-   ↓
-고객 최종 확인
-   ↓
-Tool 실행 (취소 · 환불)
-   ↓
-결과 검증
-   ↓
-고객 안내 · 예외는 상담원 이관
-```
-
-목표는 **정상 업무의 자동화율을 올리고, 예외만 사람이 처리하는 구조**입니다.
-
----
-
-## 문제 정의
-
-취소·환불은 **상태를 바꾸는 업무**입니다. 조회형 챗봇과 근본적으로 다릅니다.
-
-| 위험 | 결과 |
-|------|------|
-| 중복 실행 | 환불 두 번 지급 |
-| 부분 실행 | 예약은 취소됐는데 환불이 안 됨 |
-| 잘못된 판단 | 환불 불가 건을 환불 |
-| 근거 없는 답변 | 존재하지 않는 정책 안내 |
-
-따라서 이 프로젝트의 설계는 **"LLM이 똑똑한가"가 아니라 "틀렸을 때 안전한가"** 를 중심으로 구성합니다.
-
----
-
-## 기술 범위
-
-### LangGraph 상태 그래프 🆕
-
-```text
-        intent
-          ↓
-        plan
-          ↓
-      retrieve  ←──────┐
-          ↓            │ 정보 부족
-        decide ────────┘
-          ↓
-    ┌─────┴─────┬──────────┐
-    ↓           ↓          ↓
-  respond    confirm    escalate
- (조회만)      ↓
-            execute
-              ↓
-            verify
-              ↓
-       ┌──────┴──────┐
-       ↓             ↓
-    respond      escalate
-                (검증 실패)
-```
-
-| 요소 | 설계 |
-|------|------|
-| State | `AgentState` (TypedDict) — 문의·수집정보·판단결과·실행이력 |
-| Checkpointer | PostgreSQL — 세션 중단/재개 지원 |
-| 조건부 엣지 | 위험도 · 정보 충분성 · 검증 결과로 분기 |
-| Interrupt | `confirm` 노드에서 그래프 중단 → 고객 응답 대기 |
-
-### Tool 설계 — 읽기와 쓰기를 분리 🆕
-
-| Tool | 유형 | 위험도 | 자동 실행 |
-|------|------|--------|----------|
-| `get_property` | Read | 낮음 | ✅ |
-| `get_booking` | Read | 낮음 | ✅ |
-| `get_customer` | Read | 낮음 | ✅ |
-| `get_cancellation_policy` | Read (RAG) | 낮음 | ✅ |
-| `calculate_refund` | Read (계산) | 중간 | ✅ (안내만) |
-| `cancel_booking` | **Write** | 높음 | ❌ 고객 확인 필수 |
-| `process_refund` | **Write** | 높음 | ❌ 고객 확인 필수 |
-
-각 Tool은 Pydantic 스키마로 입출력을 정의하고, **Agent가 DB를 직접 다루지 않습니다.**
-
-### 멱등성 🆕
-
-같은 요청이 반복돼도 중복 처리되지 않아야 합니다.
-
-```text
-취소 요청
-   ↓
-idempotency_key = hash(booking_id + action + request_id)
-   ↓
-┌────────────────────┬─────────────────────┐
-│ 최초 요청           │ 중복 요청            │
-│ 실행 후 결과 저장    │ 저장된 결과 그대로 반환│
-└────────────────────┴─────────────────────┘
-```
-
-DB에 `UNIQUE(idempotency_key)` 제약을 걸어 **애플리케이션 로직이 아니라 DB 레벨에서** 중복을 차단합니다.
-
-> 애플리케이션 로직으로 "이미 처리됐나?"를 조회한 뒤 실행하면 그 사이에 두 번째 요청이 끼어들 수 있습니다. **제약으로 막으면 경합 자체가 성립하지 않습니다.**
-
-### 원자성 — 취소와 환불은 함께 🆕
-
-```text
-cancel_booking + process_refund
-        ↓
-┌───────────────────────────────┐
-│ 같은 트랜잭션으로 처리          │
-│                               │
-│ 외부 PG 호출이 끼면            │
-│   → Saga + 보상 트랜잭션       │
-│   → 환불 실패 시 취소 롤백      │
-│   → 롤백 불가 시 즉시 에스컬레이션│
-└───────────────────────────────┘
-```
-
-부분 처리 상태로 방치하지 않는 것이 원칙입니다.
-
-### Human-in-the-Loop 게이트 🆕
-
-```text
-단순 문의 (체크인 시간?)          → 자동 응대
-예약 조회                        → 자동 처리
-취소 가능 여부 · 환불 금액 안내    → 자동 판단
-─────────────────────────────────────────────
-실제 취소 / 환불 실행             → 고객 최종 확인 필수
-정책 조회 실패 / 데이터 불일치     → 자동 실행 중단
-분쟁 · 판단 불가                  → 상담원 이관
-```
-
-> UI는 **요청 → 확인 → 결과** 3단계로 구성합니다. 금액과 조건을 확인 화면에서 명시적으로 보여주고, 고객이 승인한 뒤에야 상태 변경 Tool이 실행됩니다. **돈이 움직이기 전에 사람이 한 번 멈춘다**는 것이 이 게이트의 목적입니다.
-
-### Silent Fallback 금지 🆕
-
-정보를 확인하지 못했을 때 그럴듯한 답을 만들지 않습니다.
-
-```text
-정책 조회 실패
-   ↓
-❌ "일반적으로 7일 전까지는 전액 환불됩니다"   (추측)
-✅ "해당 숙소의 취소 정책을 확인하지 못했습니다.
-    상담원에게 연결해 드리겠습니다."          (명시적 실패)
-```
-
-### 결과 검증 🆕
-
-Tool 실행 후 **실제 상태**를 다시 읽어 응답과 대조합니다.
-
-| 검증 항목 |
-|-----------|
-| 예약 상태가 실제로 `CANCELLED`인가 |
-| 환불 금액이 정책 계산 결과와 일치하는가 |
-| 고객에게 안내한 금액과 실제 처리 금액이 같은가 |
-| 중복 실행이 발생하지 않았는가 |
-
-### 평가 지표 🆕
-
-Agent는 "잘 동작하는 것 같다"로 끝내지 않습니다.
-
-| 지표 | 정의 |
-|------|------|
-| **자동화율** | 상담원 개입 없이 완결된 문의 비율 |
-| **태스크 성공률** | 의도한 업무가 정확히 수행된 비율 |
-| **오응대율** | 잘못된 정보를 안내한 비율 (가장 중요) |
-| **에스컬레이션율** | 상담원 이관 비율 (낮다고 좋은 것 아님) |
-| **Tool 호출 정확도** | 올바른 Tool을 올바른 인자로 호출한 비율 |
-| **평균 처리 시간** | 문의 접수 → 완결 |
-
-시나리오 기반 회귀 테스트셋(정상 · 경계 · 예외 각 N건)으로 매 변경마다 측정합니다.
-
----
-
-## 구현 로드맵
-
-| Phase | 산출물 | 착수 조건 |
-|-------|--------|-----------|
-| **0** | ✅  CS 시나리오 정의 (정상 · 경계 · 예외) + ERD | — |
-| **1** | ✅  FastAPI 백엔드 스켈레톤 + 숙박 도메인 모델 | Phase 0 |
-| **2** | ✅  Read Tools 4종 (`get_booking` / `get_property` / `get_customer` / 정책) | Phase 1 |
-| **3** | ✅  `calculate_refund` — 정책 기반 환불 금액 계산 | Phase 2 |
-| **4** | ✅  LangGraph 그래프 — intent / plan / retrieve / decide / respond | Phase 3 |
-| **5** | ✅  HITL — `confirm` 노드 + interrupt + 프론트 확인 화면 | Phase 4 |
-| **6** | ✅  Write Tools + 멱등성 키 + 원자적 취소·환불 | Phase 5 |
-| **7** | ✅  `verify` 노드 — 실행 결과 검증 | Phase 6 |
-| **8** | Policy RAG 연결 (RAG-Marketing 엔진 재사용) | Phase 2 |
-| **9** | ✅  에스컬레이션 + 실패 로깅 | Phase 7 |
-| **10** | ✅  평가 하네스 — 시나리오 회귀 테스트 + 지표 측정 | Phase 9 |
-
-**Phase 7까지가 최소 완성선**입니다. 조회 → 판단 → 확인 → 실행 → 검증이 한 바퀴 돌면 프로젝트로서 성립합니다.
-
----
-
-## 완료 정의 (DoD)
-
-- [ ] "내일 체크인인데 취소하고 환불받고 싶어요"가 끝까지 처리된다
-- [ ] 상태 변경 전 반드시 고객 확인 단계를 거친다 (테스트로 증명)
-- [ ] 같은 취소 요청을 두 번 보내도 환불이 한 번만 발생한다
-- [ ] 환불 실패 시 예약 취소가 롤백되거나 에스컬레이션된다
-- [ ] 정책 조회 실패 시 추측 답변 대신 이관된다
-- [ ] 시나리오 회귀 테스트셋에서 **오응대율 0%** 를 유지한다
-- [ ] 자동화율 / 에스컬레이션율이 수치로 보고된다
-
----
-
-## 기술 스택
-
-### 핵심 (Python / FastAPI)
-
-| 영역 | 기술 |
-|------|------|
-| 언어 | Python 3.11 |
-| API | **FastAPI**, Pydantic v2, Uvicorn, SSE |
-| Agent | **LangGraph** |
-| LLM | OpenAI SDK (`gpt-4o-mini`) |
-| ORM | SQLAlchemy 2.0 (async), asyncpg |
-| 마이그레이션 | Alembic |
-| DB | PostgreSQL (도메인 + LangGraph Checkpointer) |
-| 정책 검색 | FAISS + BM25 (RAG-Marketing 엔진 재사용) |
-| 테스트 | pytest, pytest-asyncio |
-| 관측 | structlog, 자체 Tracer |
-
-### 클라이언트
-
-Next.js 14 + TypeScript + Tailwind + shadcn/ui + TanStack Query
-
----
-
-## 프로젝트 구조 (목표)
-
-```text
-Agent-Customer-Support/
-├── backend/                          🆕
-│   ├── app/
-│   │   ├── main.py                   FastAPI 진입점
-│   │   ├── api/v1/
-│   │   │   ├── support.py            대화 · HITL 확인
-│   │   │   ├── bookings.py
-│   │   │   ├── properties.py
-│   │   │   └── policies.py
-│   │   ├── agent/
-│   │   │   ├── graph.py              LangGraph 정의
-│   │   │   ├── state.py              AgentState
-│   │   │   ├── nodes/
-│   │   │   │   ├── intent.py
-│   │   │   │   ├── plan.py
-│   │   │   │   ├── retrieve.py
-│   │   │   │   ├── decide.py
-│   │   │   │   ├── confirm.py
-│   │   │   │   ├── execute.py
-│   │   │   │   ├── verify.py
-│   │   │   │   └── escalate.py
-│   │   │   ├── tools/
-│   │   │   │   ├── booking.py
-│   │   │   │   ├── property.py
-│   │   │   │   ├── customer.py
-│   │   │   │   ├── policy.py         RAG 검색
-│   │   │   │   └── payment.py
-│   │   │   └── prompts/
-│   │   ├── services/
-│   │   │   ├── refund.py             환불 금액 계산
-│   │   │   ├── idempotency.py
-│   │   │   └── saga.py               보상 트랜잭션
-│   │   ├── models/
-│   │   └── schemas/
-│   ├── alembic/
-│   └── tests/
-│       └── scenarios/                시나리오 회귀 테스트
-├── frontend/                         🔨  Next.js 클라이언트
-│   ├── app/(main)/
-│   │   ├── bookings/
-│   │   ├── support/
-│   │   └── settings/
-│   ├── components/
-│   └── lib/
-├── eval/                             🆕
-│   ├── testset.jsonl
-│   └── run_eval.py
-├── docs/
-│   ├── architecture.md
-│   ├── agent-workflow.md
-│   ├── tool-spec.md
-│   ├── policy.md
-│   ├── naming-convention.md          ✅ 스키마·명명 규약
-│   └── erd.dbml
-└── requirements.txt
-```
-
----
-
-## 핵심 설계 원칙
-
-1. **SSoT** — 예약·정책의 원천은 DB. Agent가 정보를 만들어내지 않는다
-2. **SRP** — Tool 하나, Agent 노드 하나가 각각 하나의 책임만 갖는다
-3. **Read / Write 분리** — 조회는 자유롭게, 상태 변경은 게이트를 거쳐서
-4. **Idempotency** — 같은 요청이 반복돼도 결과는 한 번만
-5. **Atomicity** — 취소와 환불은 함께 성공하거나 함께 되돌린다
-6. **No Silent Fallback** — 모르면 모른다고 하고 사람에게 넘긴다
-7. **Human-in-the-Loop** — 돈이 움직이기 전에 사람이 확인한다
-8. **Verify After Execute** — 실행했다고 믿지 않고 다시 읽어 확인한다
-
----
-
-## 다른 레포와의 연결
-
-| 방향 | 내용 |
-|------|------|
-| **RAG-Marketing →** | 검색 엔진을 정책 문서 조회에 재사용 |
-| **→ Data-Growth** | 문의·취소 이벤트를 이탈 원인 분석에 제공 |
-| **→ ML-Product** | 취소 패턴을 수요 예측의 보정 신호로 제공 |
-
-플랫폼 전체 구성은 [프로필 README](https://github.com/MoonSuhyeon)를 참고하세요.
+## Docs
+
+| | |
+|---|---|
+| `backend/app/agent/graph.py` | Node graph and the interrupt point |
+| `backend/app/agent/tools.py` | Read/write split and risk levels |
+| `backend/app/agent/policy_rag.py` | Retrieval with an abstain gate |
+| `backend/app/domain.py` | Idempotency and compensation at the store |
+| `backend/tests/test_agent_safety.py` | Each guarantee, pinned |
