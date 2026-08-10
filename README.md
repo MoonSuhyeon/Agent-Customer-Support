@@ -2,8 +2,9 @@
 
 *Personal project*
 
-![Agent Engineering](https://img.shields.io/badge/Agent%20Engineering-0E1725?style=flat-square)
-![LangGraph](https://img.shields.io/badge/LangGraph-41506A?style=flat-square) ![HITL](https://img.shields.io/badge/HITL-41506A?style=flat-square) ![tool calling](https://img.shields.io/badge/tool%20calling-41506A?style=flat-square) ![state management](https://img.shields.io/badge/state%20management-41506A?style=flat-square) ![idempotency](https://img.shields.io/badge/idempotency-41506A?style=flat-square) ![compensation](https://img.shields.io/badge/compensation-41506A?style=flat-square)
+![Agent Engineering](https://img.shields.io/badge/Agent%20Engineering-0B1220?style=for-the-badge)
+
+![LangGraph](https://img.shields.io/badge/LangGraph-7C3AED?style=for-the-badge) ![tool calling](https://img.shields.io/badge/tool%20calling-7C3AED?style=for-the-badge) ![HITL](https://img.shields.io/badge/HITL-BE123C?style=for-the-badge) ![idempotency](https://img.shields.io/badge/idempotency-BE123C?style=for-the-badge) ![compensation](https://img.shields.io/badge/compensation-BE123C?style=for-the-badge) ![state management](https://img.shields.io/badge/state%20management-475569?style=for-the-badge)
 
 Most support questions are lookups. **Cancellation and refund are not** — they
 move money and change booking state, and the guest is usually asking the day
