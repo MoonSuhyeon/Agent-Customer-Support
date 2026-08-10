@@ -1,4 +1,4 @@
-# A Support Agent That Stops Before It Touches Money
+# LangGraph HITL Workflow for Support Automation
 
 *Personal project*
 
