@@ -2,6 +2,9 @@
 
 *Personal project*
 
+![Agent Engineering](https://img.shields.io/badge/Agent%20Engineering-0E1725?style=flat-square)
+![LangGraph](https://img.shields.io/badge/LangGraph-41506A?style=flat-square) ![HITL](https://img.shields.io/badge/HITL-41506A?style=flat-square) ![tool calling](https://img.shields.io/badge/tool%20calling-41506A?style=flat-square) ![state management](https://img.shields.io/badge/state%20management-41506A?style=flat-square) ![idempotency](https://img.shields.io/badge/idempotency-41506A?style=flat-square) ![compensation](https://img.shields.io/badge/compensation-41506A?style=flat-square)
+
 Most support questions are lookups. **Cancellation and refund are not** — they
 move money and change booking state, and the guest is usually asking the day
 before check-in, when the refund tier is about to change.
