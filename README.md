@@ -139,39 +139,6 @@ attaching retrieval would have quietly broken the no-guessing rule.
 
 ---
 
-## Results
-
-| | |
-|---|---|
-| Scenarios | **8/8** — normal, boundary, exception |
-| **Misinformation rate** | **0.0%** |
-| Duplicate request | refund executes **once** |
-| PG failure | booking restored to `CONFIRMED`, escalated |
-| Compensation failure | `needs_human`, partial state left visible |
-| Policy not indexed | abstains — no similar policy substituted |
-| Tests | **33** |
-
-Refund amounts follow the policy tier, not a heuristic: a booking ten days out
-under a flexible policy returns 240,000원 in full; the same request one day
-before check-in returns 36,000원, which is the 20% tier.
-
-**A real bug surfaced here.** The idempotency record was stored as
-`{"status": "DONE", **result}` — and `result` also carried a `status`
-(`"CANCELLED"`), which overwrote the record state. Retries were then judged
-"still in progress" and the replay path never fired. It was caught only because
-a test called the write tool twice. Idempotency does not fail visibly; it fails
-the second time.
-
-**Adding retrieval did not weaken the guarantees.**
-`get_cancellation_policy` moved from a dictionary lookup to hybrid document
-search, and all 18 pre-existing tests still passed unchanged — including the one
-that requires escalation when a policy is missing. The safety contract was
-written against behavior, not implementation.
-
-Escalation runs at 3/8. Lowering that is not the goal; **raising automation
-while misinformation stays at 0% is.** When the policy cannot be confirmed,
-escalating is the correct answer.
-
 ## Stack
 
 | | |
@@ -187,6 +154,84 @@ escalating is the correct answer.
 Runs without an API key. Intent classification defaults to deterministic rules —
 in a path where a wrong classification costs money, the rule is the baseline and
 the LLM is the substitutable part.
+
+---
+
+## Trade-offs
+
+| | |
+|---|---|
+| Scenarios | **8/8** — normal, boundary, exception |
+| **Misinformation rate** | **0.0%** |
+| Duplicate request | refund executes **once** |
+| PG failure | booking restored to `CONFIRMED`, escalated |
+| Compensation failure | `needs_human`, partial state left visible |
+| Policy not indexed | abstains — no similar policy substituted |
+
+### The graph halts before every state change
+
+**Buys** — no wrong refund is possible without a human saying yes.
+Misinformation stays at **0.0%** across all eight scenarios, and no path reaches
+`execute` without passing `confirm` — asserted by test, not by convention.
+**Costs** — a ceiling on full automation. Three of eight scenarios escalate, and
+that number cannot go to zero by design.
+
+Lowering escalation is not the goal. Raising automation **while misinformation
+stays at zero** is. When a policy cannot be confirmed, escalating is the correct
+answer, not a failure.
+
+### A database constraint instead of an application-level duplicate check
+
+Reading "was this already processed?" and then acting leaves a window for a
+second request to enter it.
+
+**Buys** — the race cannot form. Calling the write tool twice with the same key
+executes the refund **once** and replays the stored result the second time.
+**Costs** — every write path must carry an idempotency key. It is a discipline
+imposed on all future write tools, not a local fix.
+
+This is also where a real bug surfaced: the idempotency record was stored as
+`{"status": "DONE", **result}`, and `result` carried its own `status`
+(`"CANCELLED"`), overwriting the record state. Retries were then judged still in
+progress and the replay path never fired. Idempotency does not fail visibly — it
+fails the second time.
+
+### Checkpoints in PostgreSQL instead of process memory
+
+**Buys** — the graph can sit at `confirm` for days and still resume, and API
+instances scale horizontally because no session lives in a process.
+**Costs** — a database write at each node boundary, and graph state becomes
+schema that has to be migrated.
+
+### Compensation instead of a distributed transaction
+
+**Buys** — no partial state survives. When the payment gateway rejects a refund,
+the cancellation is rolled back and the case escalates; when the rollback itself
+fails, the state is left visible and flagged `needs_human` rather than quietly
+repaired.
+**Costs** — eventual consistency. A brief window exists where the booking is
+cancelled and the refund has not landed.
+
+### Deterministic rules as the intent baseline
+
+**Buys** — no model call on the classification path, so no token cost and no
+latency there, and the same input always routes the same way. Ambiguous input
+returns `UNKNOWN` and escalates rather than guessing.
+**Costs** — narrow phrasing coverage. Requests worded outside the rule set
+escalate that would not need to, which shows up as a higher escalation rate.
+
+### Retrieval with an abstain path
+
+Search always returns something. Attaching it naively would have broken the
+no-guessing rule without any test failing.
+
+**Buys** — `get_cancellation_policy` moved from a dictionary lookup to hybrid
+document search and **all 18 pre-existing tests passed unchanged**, including the
+one requiring escalation when a policy is missing. The safety contract was
+written against behaviour, so the implementation could be replaced under it.
+**Costs** — retrieval quality now caps the automation rate. A threshold that is
+too strict escalates good cases; too loose and it guesses. That threshold is the
+dial, and it is set conservatively.
 
 ## Run locally
 
