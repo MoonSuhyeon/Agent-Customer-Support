@@ -31,7 +31,7 @@ Policy lookup reuses the retrieval core from
 returns *something*, so that core also carries an abstain path — otherwise
 attaching retrieval would have quietly broken the no-guessing rule.
 
-**8/8 scenarios** · **0% misinformation** · duplicate requests refund **once** · **33 tests**
+**8/8 scenarios** · **0% misinformation** · duplicate requests refund **once** · **38 tests**
 
 ---
 
@@ -39,11 +39,12 @@ attaching retrieval would have quietly broken the no-guessing rule.
 
 ```
               ┌────────────────────────────────────────────────┐
-              │            SUPPORT UI  (Next.js)               │
-              │      request  →  confirm  →  result            │
+              │   SUPPORT CONSOLE  (Jinja2 + HTMX, no build)   │
+              │      request  →  ⏸ approve  →  result          │
               │  amount and policy shown before approval       │
+              │  plain form POST works if HTMX never loads     │
               └───────────────────────┬────────────────────────┘
-                                      │  SSE
+                                      │  same process
                                       ▼
         ┌──────────────────────────────────────────────────────────┐
         │                    AGENT API  (FastAPI)                  │
@@ -51,6 +52,8 @@ attaching retrieval would have quietly broken the no-guessing rule.
         │  POST /support/messages      start or continue           │
         │  POST /support/confirm       customer approval  ← gate   │
         │  GET  /support/sessions/{id} state and full trace        │
+        │                                                          │
+        │  GET  /console/{id}          the same gate, rendered     │
         │                                                          │
         │  confirm is a separate endpoint because the graph        │
         │  is suspended, not because the UI needs two screens      │
@@ -150,8 +153,8 @@ attaching retrieval would have quietly broken the no-guessing rule.
 | API | FastAPI · Pydantic v2 · SSE |
 | Retrieval | `marketplace-retrieval` (from RAG-Marketing) |
 | Storage | PostgreSQL (domain + graph checkpoints) |
-| Frontend | Next.js 14 · TypeScript · Tailwind · shadcn/ui |
-| Testing | pytest — 33 tests |
+| Console | Jinja2 server-rendered · HTMX for partial swaps — no build step, no JavaScript to maintain |
+| Testing | pytest — 38 tests |
 
 Runs without an API key. Intent classification defaults to deterministic rules —
 in a path where a wrong classification costs money, the rule is the baseline and
@@ -222,6 +225,21 @@ returns `UNKNOWN` and escalates rather than guessing.
 **Costs** — narrow phrasing coverage. Requests worded outside the rule set
 escalate that would not need to, which shows up as a higher escalation rate.
 
+### A server-rendered console instead of a separate frontend app
+
+The approval endpoint already lives in this process. A separate single-page app
+would mean a second build, a second port, CORS, and a second place for the
+"nothing executes before approval" rule to drift out of sync.
+
+**Buys** — the console calls the same graph through the same functions as the
+API, so a test can assert that *the screen* refuses to execute without approval,
+not just that the endpoint does. Install is `pip install -r requirements.txt`
+and nothing else. Forms are plain `POST`, so the console still works when the
+HTMX CDN is unreachable.
+**Costs** — no client-side routing or optimistic updates, and every interaction
+is a round trip. For a console whose entire job is to pause and wait for a
+person, that is not a cost worth paying to avoid.
+
 ### Retrieval with an abstain path
 
 Search always returns something. Attaching it naively would have broken the
@@ -240,11 +258,15 @@ dial, and it is set conservatively.
 ```bash
 pip install -r backend/requirements.txt
 cd backend
-pytest                          # 33 tests
+pytest                          # 38 tests
 python scripts/run_agent_demo.py
 
-uvicorn app.main:app --reload   # /docs
+uvicorn app.main:app --reload   # console at / · API docs at /docs
 ```
+
+The console is served by the same process as the API — no `npm install`, no
+second port, no CORS. It loads HTMX from a CDN for partial page swaps; if that
+request fails the forms still submit normally and the console keeps working.
 
 ## Docs
 
@@ -254,4 +276,6 @@ uvicorn app.main:app --reload   # /docs
 | `backend/app/agent/tools.py` | Read/write split and risk levels |
 | `backend/app/agent/policy_rag.py` | Retrieval with an abstain gate |
 | `backend/app/domain.py` | Idempotency and compensation at the store |
+| `backend/app/console.py` | The approval gate as a screen, no JS framework |
 | `backend/tests/test_agent_safety.py` | Each guarantee, pinned |
+| `backend/tests/test_console.py` | The screen honours the gate too, not just the API |
