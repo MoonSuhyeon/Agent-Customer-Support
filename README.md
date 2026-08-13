@@ -31,6 +31,8 @@ Policy lookup reuses the retrieval core from
 returns *something*, so that core also carries an abstain path — otherwise
 attaching retrieval would have quietly broken the no-guessing rule.
 
+**8/8 scenarios** · **0% misinformation** · duplicate requests refund **once** · **33 tests**
+
 ---
 
 ## Architecture
