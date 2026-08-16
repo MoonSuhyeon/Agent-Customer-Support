@@ -261,6 +261,13 @@ uvicorn app.main:app --reload   # API docs at /docs
 Runs without an API key and without Node. `run_agent_demo.py` walks the full loop
 in the terminal; `/docs` lets you drive the approval gate by hand.
 
+The console that calls this API lives in
+[Data-Growth](https://github.com/MoonSuhyeon/Data-Growth) — one operator screen for four services rather than four
+separate UIs. It generates its TypeScript types from the `openapi.json` committed
+here, so a change to this schema breaks its build instead of silently rendering a
+wrong value.
+
+
 ## Docs
 
 | | |
