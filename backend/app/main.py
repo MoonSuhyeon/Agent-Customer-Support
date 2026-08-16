@@ -7,8 +7,8 @@
     POST /support/confirm         고객 승인 → 상태 변경 실행
     GET  /support/sessions/{id}   현재 상태와 트레이스
 
-상담 콘솔(``/``)은 같은 프로세스에서 서버 렌더링으로 붙는다. 그래프를 실행하는
-함수를 콘솔에 넘겨주므로, 화면과 API 가 서로 다른 경로로 갈라지지 않는다.
+화면은 이 저장소에 없다. 운영 콘솔이 이 API 를 호출한다 — 저장소마다 화면을 따로
+두면 같은 규칙이 여러 곳으로 갈라지기 때문이다.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 
 from app.agent.graph import build_graph
-from app.console import build_router as build_console_router
 from app.domain import seed
 
 app = FastAPI(title="Agent Customer Support", version="0.1.0")
@@ -35,20 +34,6 @@ def _cfg(session_id: str) -> dict:
 
 def _awaiting(session_id: str) -> bool:
     return _agent.get_state(_cfg(session_id)).next == ("execute",)
-
-
-def _invoke(session_id: str, message: str, request_id: str) -> dict:
-    return _agent.invoke(
-        {"message": message, "request_id": request_id, "trace": []}, _cfg(session_id)
-    )
-
-
-def _resume(session_id: str, approved: bool) -> dict:
-    """승인이면 멈춘 지점에서 이어서, 거절이면 그대로 둔다."""
-    snap = _agent.get_state(_cfg(session_id))
-    if not _awaiting(session_id) or not approved:
-        return snap.values
-    return _agent.invoke(None, _cfg(session_id))
 
 
 class MessageIn(BaseModel):
@@ -124,7 +109,3 @@ def get_session(session_id: str) -> dict:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "bookings": len(_store.bookings)}
-
-
-# 상담 콘솔. API 와 같은 그래프·같은 체크포인터를 쓴다.
-app.include_router(build_console_router(_agent, _store, invoke=_invoke, resume=_resume))
