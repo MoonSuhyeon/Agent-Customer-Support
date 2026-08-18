@@ -101,15 +101,9 @@ def test_a_rejected_decision_carries_a_reason_and_no_refund():
     assert d["refund_amount"] is None, "0 원과 '없음' 은 다른 뜻이다"
 
 
-# ─────────────────────────────── 커밋된 스키마와 코드가 같은가
-def test_committed_openapi_matches_the_app():
-    """`openapi.json` 이 낡으면 소비자가 낡은 계약으로 타입을 만든다."""
-    import json
-    from pathlib import Path
-
-    committed = json.loads(
-        (Path(__file__).resolve().parents[2] / "openapi.json").read_text(encoding="utf-8")
-    )
-    assert committed == json.loads(json.dumps(app.openapi())), (
-        "scripts/export_openapi.py 를 다시 돌려야 한다"
-    )
+# 커밋된 openapi.json 이 코드와 같은지는 **여기서 검사하지 않는다.**
+#
+# CI 워크플로에 이미 그 단계가 있다(`OpenAPI 스키마가 최신인가`). 같은 검사를
+# 테스트로 한 번 더 하면 두 곳이 같은 이유로 같이 깨지고, 고칠 때도 두 곳을
+# 봐야 한다. 그리고 이 검사는 **생성기 버전에 민감해서** 테스트가 아니라
+# 환경 검사에 가깝다 — 의존성이 고정돼 있어야 성립한다.
