@@ -89,7 +89,8 @@ def main() -> int:
 
     print()
     print("  거절·보류 사유 (앞 5건)")
-    for o in [x for x in plan.outcomes if x.decision is not Decision.APPROVED][:5]:
+    for o in [x for x in plan.outcomes
+              if x.decision not in (Decision.APPROVED, Decision.HELD_OUT)][:5]:
         print(f"    {o}")
 
     print()
@@ -110,9 +111,31 @@ def main() -> int:
 
     print()
     print(BAR)
+    print("A4 — 통과했는데 일부러 안 한 것")
+    held = plan.held_out
+    eligible = len(plan.approved) + len(held)
+    print(f"  정책을 통과한 {eligible:,}개 중 홀드아웃 {len(held):,}개 "
+          f"({len(held) / eligible:.0%})")
+    # 홀드아웃은 실행하지 않으므로 **한 푼도 안 쓴다.** 그래서 이 돈은 예산에서
+    # 빠지지 않고, 다음 순번의 제안이 쓸 수 있다.
+    print(f"  실행했다면 썼을 돈 {sum(o.proposal.cost for o in held):,}원 — "
+          f"실제 집행 {plan.spent:,}원 / 예산 {plan.budget:,}원")
+    print("  → 낭비처럼 보이지만 이걸 빼면 효과를 잴 수 없다. 저수요 후보는")
+    print("     '예측이 가장 낮은 것' 으로 고르므로 아무것도 안 해도 다음 회차에")
+    print("     오른다(평균 회귀). 홀드아웃이 없으면 그 상승이 전부 개입 공로로")
+    print("     잡히고, 에이전트는 실패해도 성공한 것처럼 보인다.")
+    print()
+    print("  홀드아웃은 **거절이 아니다.** 정책을 다 통과했다 — 거절로 세면")
+    print("  AI 권고 채택률이 홀드아웃 비율만큼 망가진다.")
+    if held:
+        u = held[0].proposal.unit
+        print(f"  그리고 그 단위는 잠긴다: {u} 에 다음 배치가 개입하려 하면 밀린다.")
+
+    print()
+    print(BAR)
     print("남은 것")
-    print("  A4 홀드아웃 배정 — 승인된 단위 중 일부를 **일부러 손대지 않는다**")
-    print("  A5 홀드아웃 대비 효과 — 평균 회귀와 개입 효과를 가른다")
+    print("  A5 홀드아웃 대비 효과 — Data-Growth 에 있다:")
+    print("     python scripts/run_holdout_demo.py")
     return 0
 
 

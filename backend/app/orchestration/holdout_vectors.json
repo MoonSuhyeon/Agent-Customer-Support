@@ -1,0 +1,25 @@
+{
+  "_": "홀드아웃 배정 규칙의 골든 벡터. Data-Growth 와 bank-transfer-demo 가 같은 답을 내는지 고정한다.",
+  "experiment_id": "intervention_holdout",
+  "holdout_rate": 0.3,
+  "vectors": {
+    "P001:2026-09-01": "treated",
+    "P001:2026-09-14": "treated",
+    "P001:2026-09-28": "treated",
+    "P007:2026-09-01": "treated",
+    "P007:2026-09-14": "treated",
+    "P007:2026-09-28": "holdout",
+    "P042:2026-09-01": "holdout",
+    "P042:2026-09-14": "treated",
+    "P042:2026-09-28": "treated",
+    "P099:2026-09-01": "holdout",
+    "P099:2026-09-14": "treated",
+    "P099:2026-09-28": "treated",
+    "P128:2026-09-01": "holdout",
+    "P128:2026-09-14": "treated",
+    "P128:2026-09-28": "treated",
+    "P256:2026-09-01": "treated",
+    "P256:2026-09-14": "treated",
+    "P256:2026-09-28": "holdout"
+  }
+}

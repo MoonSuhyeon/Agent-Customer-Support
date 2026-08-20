@@ -8,11 +8,13 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
 
-from app.orchestration.coordinator import Coordinator, Policy, Proposal
+from app.orchestration.coordinator import (HOLDOUT_VECTORS, Coordinator, Policy,
+                                           Proposal, holdout_arm)
 from app.orchestration.ledger import Decision, Ledger, Unit
 
 D = date(2025, 7, 10)
@@ -32,7 +34,16 @@ def prop(agent="promotion", unit=U1, cost=10_000, gain=1.0, unc=0.1, rid=None,
 
 
 def coord(ledger, **policy) -> Coordinator:
-    base = dict(budget=1_000_000, autonomy_uncertainty_max=0.35, min_efficiency=0.0)
+    """기본은 **홀드아웃을 끈** 조정자다.
+
+    경합·예산·자율성 테스트는 배분 규칙을 재는 것이지 대조군 추출을 재는 게
+    아니다. 홀드아웃을 켠 채로 두면 그 테스트들이 배정 해시의 결과에 흔들리고,
+    단위 하나를 바꿨을 뿐인데 무관한 테스트가 깨진다.
+
+    홀드아웃은 아래 전용 절에서 켜고 검사한다.
+    """
+    base = dict(budget=1_000_000, autonomy_uncertainty_max=0.35, min_efficiency=0.0,
+                holdout_rate=0.0)
     base.update(policy)
     return Coordinator(ledger, Policy(**base))
 
@@ -190,3 +201,112 @@ def test_ordering_is_deterministic():
     first = [o.proposal.request_id for o in coord(Ledger("sqlite://")).decide(props).outcomes]
     second = [o.proposal.request_id for o in coord(Ledger("sqlite://")).decide(list(reversed(props))).outcomes]
     assert first == second
+
+
+# ─────────────────────────────── A4: 홀드아웃
+#
+# 통과한 제안 중 일부를 **일부러 실행하지 않는다.** 낭비처럼 보이지만 이걸 빼면
+# 효과를 잴 수 없다 — 저수요 후보는 아무것도 안 해도 평균 회귀로 오른다.
+def test_holdout_takes_a_share_of_what_would_have_been_approved():
+    l = Ledger("sqlite://")
+    units = [Unit(f"P{i:04d}", D) for i in range(400)]
+    # 예산을 넉넉히 준다 — 여기서 재는 건 배분이 아니라 대조군 추출이다
+    plan = coord(l, holdout_rate=0.3, budget=10_000_000).decide(
+        [prop(unit=u, rid=f"r{i}") for i, u in enumerate(units)])
+
+    held = len(plan.held_out)
+    assert 0.25 < held / len(units) < 0.35, f"홀드아웃이 {held}/{len(units)}"
+    assert len(plan.approved) + held == len(units)
+
+
+def test_a_held_out_unit_is_not_a_rejection():
+    """거절로 세면 AI 권고 채택률이 홀드아웃만큼 망가진다."""
+    l = Ledger("sqlite://")
+    units = [Unit(f"P{i:04d}", D) for i in range(200)]
+    plan = coord(l, holdout_rate=0.3, budget=10_000_000).decide(
+        [prop(unit=u, rid=f"r{i}") for i, u in enumerate(units)])
+
+    assert plan.held_out, "이 표본이면 홀드아웃이 나와야 한다"
+    assert not any(o.decision is Decision.REJECTED for o in plan.outcomes)
+    assert all(not o.decision.acted for o in plan.held_out)
+
+
+def test_a_holdout_spends_no_budget():
+    """실행하지 않았으니 돈도 안 썼다. 예산에 세면 개입군이 부당하게 줄어든다."""
+    l = Ledger("sqlite://")
+    units = [Unit(f"P{i:04d}", D) for i in range(200)]
+    plan = coord(l, holdout_rate=0.3).decide(
+        [prop(unit=u, cost=1_000, rid=f"r{i}") for i, u in enumerate(units)])
+    assert plan.spent == len(plan.approved) * 1_000
+    assert l.spent() == plan.spent
+
+
+def test_a_held_out_unit_stays_untouched_in_a_later_batch():
+    """**대조군을 잠근다.**
+
+    다음 배치의 다른 에이전트가 홀드아웃 단위에 개입하면 그 단위는 대조군도
+    개입군도 아닌 게 되고, 그 사실은 원장 어디에도 안 남는다.
+    """
+    l = Ledger("sqlite://")
+    units = [Unit(f"P{i:04d}", D) for i in range(200)]
+    first = coord(l, holdout_rate=0.3).decide(
+        [prop(unit=u, rid=f"a{i}") for i, u in enumerate(units)])
+    held = [o.proposal.unit for o in first.held_out]
+    assert held
+
+    second = coord(l, holdout_rate=0.3).decide(
+        [prop(agent="content", unit=u, action="hero", rid=f"b{i}")
+         for i, u in enumerate(held)])
+    assert not second.approved
+    assert all(o.decision is Decision.SUPERSEDED for o in second.outcomes)
+    assert all("홀드아웃" in o.reason for o in second.outcomes)
+
+
+def test_holdout_is_decided_after_every_other_gate():
+    """대조군은 **승인됐을 것들** 중에서만 나와야 한다.
+
+    예산에서 밀렸을 단위가 대조군에 섞이면 두 군이 "정책을 통과한 정도" 부터
+    달라진다. 예산을 0 으로 두면 홀드아웃이 하나도 안 나와야 한다.
+    """
+    l = Ledger("sqlite://")
+    units = [Unit(f"P{i:04d}", D) for i in range(200)]
+    plan = coord(l, holdout_rate=0.3, budget=0).decide(
+        [prop(unit=u, cost=1_000, rid=f"r{i}") for i, u in enumerate(units)])
+    assert not plan.held_out, "예산에서 밀린 것이 대조군이 되면 안 된다"
+    assert len(plan.outcomes) == len(units)
+
+
+def test_deferred_proposals_are_not_held_out():
+    """사람 승인 대기는 아직 통과한 게 아니다."""
+    l = Ledger("sqlite://")
+    units = [Unit(f"P{i:04d}", D) for i in range(100)]
+    plan = coord(l, holdout_rate=0.3, autonomy_uncertainty_max=0.10).decide(
+        [prop(unit=u, unc=0.9, rid=f"r{i}") for i, u in enumerate(units)])
+    assert len(plan.deferred) == len(units)
+    assert not plan.held_out
+
+
+def test_holdout_off_means_no_control_group():
+    """0 으로 두면 꺼진다 — **효과를 측정하지 않겠다는 뜻이다.**"""
+    l = Ledger("sqlite://")
+    units = [Unit(f"P{i:04d}", D) for i in range(100)]
+    plan = coord(l, holdout_rate=0.0).decide(
+        [prop(unit=u, rid=f"r{i}") for i, u in enumerate(units)])
+    assert len(plan.approved) == len(units)
+    assert not plan.held_out
+
+
+def test_assignment_matches_the_shared_golden_vectors():
+    """**Data-Growth 와 같은 답을 내는가.**
+
+    배정은 여기서 하고 효과는 저기서 잰다. 두 쪽 규칙이 어긋나면 "이 단위가 어느
+    군인가" 에 답이 두 개가 되고, 홀드아웃 자체가 무의미해진다. 같은 파일이 양쪽에
+    커밋돼 있고 양쪽 테스트가 각자 검사한다 — 한쪽을 고치면 다른 쪽이 깨진다.
+    """
+    spec = json.loads(HOLDOUT_VECTORS.read_text(encoding="utf-8"))
+    rate = spec["holdout_rate"]
+    for unit_id, expected in spec["vectors"].items():
+        prop_id, stay = unit_id.split(":")
+        arm = "treated" if holdout_arm(Unit(prop_id, date.fromisoformat(stay)),
+                                       rate, spec["experiment_id"]) else "holdout"
+        assert arm == expected, f"{unit_id}: {arm} != {expected}"

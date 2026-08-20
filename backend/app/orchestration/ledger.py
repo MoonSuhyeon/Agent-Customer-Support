@@ -51,6 +51,17 @@ class Decision(str, Enum):
     REJECTED = "REJECTED"        # 정책이 막았다
     DEFERRED = "DEFERRED"        # 사람 승인 대기
     SUPERSEDED = "SUPERSEDED"    # 같은 단위를 다른 제안이 먼저 잡았다
+    HELD_OUT = "HELD_OUT"        # 통과했지만 **일부러** 손대지 않았다 — 대조군
+
+    @property
+    def acted(self) -> bool:
+        """실제로 무언가 일어났는가.
+
+        `HELD_OUT` 은 승인과 거절 어느 쪽도 아니다. 정책을 다 통과했고, 그래서
+        **거절로 세면 안 된다**(거절률이 홀드아웃만큼 부풀어 AI 권고 채택률이
+        망가진다). 동시에 실행되지 않았으므로 예산도 안 쓰고 승인으로도 안 센다.
+        """
+        return self is Decision.APPROVED
 
 
 class Intervention(Base):
@@ -84,8 +95,12 @@ class Intervention(Base):
         # 거절·보류는 여럿이어도 되므로 조건부다.
         Index(
             "uq_approved_per_unit", "property_id", "stay_date",
-            unique=True, sqlite_where=text("decision = 'APPROVED'"),
-            postgresql_where=text("decision = 'APPROVED'"),
+            unique=True,
+            # **홀드아웃도 단위를 점유한다.** 승인만 막으면 대조군으로 남긴 단위에
+            # 다음 배치의 다른 에이전트가 개입할 수 있고, 그러면 그 단위는 대조군도
+            # 개입군도 아닌 게 된다 — 그리고 그 사실은 원장 어디에도 안 남는다.
+            sqlite_where=text("decision IN ('APPROVED', 'HELD_OUT')"),
+            postgresql_where=text("decision IN ('APPROVED', 'HELD_OUT')"),
         ),
     )
 
@@ -106,6 +121,9 @@ class Ledger:
         self.url = url or LEDGER_URL
         connect_args = {"check_same_thread": False} if self.url.startswith("sqlite") else {}
         self.engine = create_engine(self.url, connect_args=connect_args, future=True)
+        # `create_all` 은 **이미 있는 인덱스를 고치지 않는다.** 제약 조건이 바뀌면
+        # 기존 파일은 옛 인덱스를 그대로 들고 있다. 시연 저장소라 마이그레이션을
+        # 두지 않았으니, 제약을 바꾼 뒤에는 파일을 지우고 다시 만들어야 한다.
         Base.metadata.create_all(self.engine)
 
     # ------------------------------------------------------------ 쓰기
@@ -133,14 +151,29 @@ class Ledger:
                 return False
 
     # ------------------------------------------------------------ 읽기
+    #: 단위를 점유하는 결정. 승인과 홀드아웃 **둘 다** 그 단위를 잠근다.
+    CLAIMING = (Decision.APPROVED.value, Decision.HELD_OUT.value)
+
     def approved_on(self, unit: Unit) -> Intervention | None:
-        """이 단위에 이미 승인된 개입. 조정자가 가장 먼저 묻는 질문이다."""
+        """이 단위에 이미 승인된 개입."""
+        return self._claim_on(unit, (Decision.APPROVED.value,))
+
+    def claimed_on(self, unit: Unit) -> Intervention | None:
+        """이 단위가 이미 잡혀 있는가. **조정자가 가장 먼저 묻는 질문이다.**
+
+        승인뿐 아니라 홀드아웃도 잡은 것으로 센다. 대조군으로 남기기로 한 단위에
+        나중에 개입이 들어가면 대조군이 오염되고, 홀드아웃 대비 효과라는 숫자가
+        조용히 의미를 잃는다.
+        """
+        return self._claim_on(unit, self.CLAIMING)
+
+    def _claim_on(self, unit: Unit, decisions: tuple[str, ...]) -> Intervention | None:
         with Session(self.engine) as s:
             return s.execute(
                 select(Intervention).where(
                     Intervention.property_id == unit.property_id,
                     Intervention.stay_date == unit.stay_date,
-                    Intervention.decision == Decision.APPROVED.value,
+                    Intervention.decision.in_(decisions),
                 )
             ).scalars().first()
 

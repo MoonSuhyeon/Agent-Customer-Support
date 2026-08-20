@@ -28,9 +28,41 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.orchestration.ledger import Decision, Ledger, Unit
+
+#: 홀드아웃 배정에 쓰는 실험 ID. **Data-Growth 와 같은 값이어야 한다.**
+HOLDOUT_EXPERIMENT = "intervention_holdout"
+
+#: 두 저장소가 같은 답을 내는지 고정하는 골든 벡터.
+#:
+#: 배정 규칙이 두 서비스에 걸쳐 있다. 여기서 계산하고 Data-Growth 가 그 결과를
+#: 읽어 효과를 잰다 — 두 쪽이 어긋나면 "이 단위가 어느 군인가" 에 답이 두 개가
+#: 되고, 그러면 홀드아웃 자체가 무의미해진다.
+#:
+#: 같은 파일이 양쪽에 커밋돼 있고 양쪽 테스트가 각자 검사한다. 커밋된
+#: `openapi.json` 을 CI 가 대조하는 것과 같은 방식이다.
+HOLDOUT_VECTORS = Path(__file__).with_name("holdout_vectors.json")
+
+
+def holdout_arm(unit: Unit, holdout_rate: float,
+                experiment_id: str = HOLDOUT_EXPERIMENT) -> bool:
+    """이 단위를 손대는가. `True` 면 개입, `False` 면 홀드아웃.
+
+    난수가 아니라 **결정적 해시**다. 난수를 쓰면 같은 단위가 회차마다 다른 군에
+    들어가고, 그러면 한 단위의 결과가 두 군에 흩어져 둘 다 못 읽는다.
+
+    Data-Growth 의 `analytics.experiments.stats.assign()` 과 **같은 식**이다.
+    variants 는 `("holdout", "treated")`, weights 는 `(rate, 1 - rate)`.
+    """
+    unit_id = f"{unit.property_id}:{unit.stay_date.isoformat()}"
+    h = hashlib.md5(f"{experiment_id}:{unit_id}".encode("utf-8")).hexdigest()
+    bucket = int(h[:8], 16) / 0xFFFFFFFF
+    return bucket >= holdout_rate
 
 
 @dataclass(frozen=True)
@@ -79,6 +111,15 @@ class Policy:
     autonomy_uncertainty_max: float = 0.35
     #: 이보다 효율이 낮으면 애초에 안 한다. 예산이 남아도 마찬가지다.
     min_efficiency: float = 0.0
+    #: 정책을 통과한 것 중 이 비율만큼은 **일부러 실행하지 않는다.**
+    #:
+    #: 낭비처럼 보이지만 이걸 빼면 효과를 잴 수 없다. 저수요 후보는 "예측이 가장
+    #: 낮은 것" 으로 고르므로 아무것도 안 해도 다음 회차에 오른다(평균 회귀).
+    #: 홀드아웃이 없으면 그 상승이 전부 개입 공로로 잡히고, 에이전트는 실패해도
+    #: 성공한 것처럼 보인다.
+    #:
+    #: 0 으로 두면 홀드아웃이 꺼진다 — **효과를 측정하지 않겠다는 뜻이다.**
+    holdout_rate: float = 0.3
 
 
 @dataclass
@@ -94,6 +135,11 @@ class Plan:
     @property
     def deferred(self) -> list[Outcome]:
         return [o for o in self.outcomes if o.decision is Decision.DEFERRED]
+
+    @property
+    def held_out(self) -> list[Outcome]:
+        """실행하지 않은 대조군. **거절이 아니다** — 정책은 통과했다."""
+        return [o for o in self.outcomes if o.decision is Decision.HELD_OUT]
 
     def __str__(self) -> str:
         c: dict[str, int] = {}
@@ -159,7 +205,7 @@ class Coordinator:
             written = self.ledger.write(
                 p.unit, p.agent, p.action, decision, reason, p.request_id, p.cost,
             )
-            if not written and decision is Decision.APPROVED:
+            if not written and decision in (Decision.APPROVED, Decision.HELD_OUT):
                 # DB 가 막았다 — 다른 프로세스가 같은 단위를 먼저 잡았다.
                 # **애플리케이션 검사를 통과했어도 여기서 진다.** 그게 제약을
                 # DB 에 둔 이유다.
@@ -167,8 +213,10 @@ class Coordinator:
                 self.ledger.write(p.unit, p.agent, p.action, decision, reason,
                                   p.request_id + ":superseded", p.cost)
 
-            if decision is Decision.APPROVED:
+            if decision in (Decision.APPROVED, Decision.HELD_OUT):
+                # 홀드아웃도 단위를 잡는다. 예산은 안 쓴다 — 실행하지 않으니까.
                 taken.add(p.unit)
+            if decision is Decision.APPROVED:
                 plan.spent += p.cost
             plan.outcomes.append(Outcome(p, decision, reason))
 
@@ -178,7 +226,10 @@ class Coordinator:
         # ── 규칙 1. 한 단위 한 개입
         if p.unit in taken:
             return Decision.SUPERSEDED, "같은 단위를 더 효율 높은 제안이 먼저 잡았다"
-        if self.ledger.approved_on(p.unit) is not None:
+        claimed = self.ledger.claimed_on(p.unit)
+        if claimed is not None:
+            if claimed.decision == Decision.HELD_OUT.value:
+                return Decision.SUPERSEDED, "이 단위는 홀드아웃이다 — 손대면 대조군이 오염된다"
             return Decision.SUPERSEDED, "이 단위에는 이미 승인된 개입이 있다"
 
         # ── 효율. 예산이 남아도 밑지는 개입은 안 한다.
@@ -200,7 +251,20 @@ class Coordinator:
                 f"{self.policy.autonomy_uncertainty_max:.3g} — 사람이 봐야 한다"
             )
 
+        # ── 마지막. 통과한 것 중 일부를 일부러 놔둔다.
+        #
+        # **순서가 중요하다.** 홀드아웃을 앞에서 뽑으면 예산이나 자율성에서 어차피
+        # 밀렸을 단위가 대조군에 섞인다. 그러면 두 군이 "정책을 통과한 정도" 부터
+        # 다르고, 차이를 개입 때문이라고 말할 수 없다. 대조군은 **승인됐을 것들**
+        # 중에서만 나와야 한다.
+        if self.policy.holdout_rate and not holdout_arm(p.unit, self.policy.holdout_rate):
+            return Decision.HELD_OUT, (
+                f"홀드아웃 — 정책을 통과했지만 효과 측정을 위해 실행하지 않는다 "
+                f"(비율 {self.policy.holdout_rate:.0%})"
+            )
+
         return Decision.APPROVED, p.reason or "정책을 통과했다"
 
 
-__all__ = ["Coordinator", "Outcome", "Plan", "Policy", "Proposal"]
+__all__ = ["Coordinator", "HOLDOUT_EXPERIMENT", "HOLDOUT_VECTORS", "Outcome",
+           "Plan", "Policy", "Proposal", "holdout_arm"]
