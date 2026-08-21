@@ -1,6 +1,41 @@
 {
   "components": {
     "schemas": {
+      "AdoptionOut": {
+        "description": "AI 권고 채택률. **사람이 판단한 것만 센다.**",
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          },
+          "reviewed": {
+            "title": "Reviewed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reviewed",
+          "accepted",
+          "pending"
+        ],
+        "title": "AdoptionOut",
+        "type": "object"
+      },
       "AgentOut": {
         "properties": {
           "awaiting_confirmation": {
@@ -120,6 +155,72 @@
         "title": "DecisionOut",
         "type": "object"
       },
+      "DecisionRow": {
+        "description": "원장 한 줄. **거절 사유가 필수다** — 이유 없는 거절은 콘솔에서 쓸모가 없다.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "agent": {
+            "title": "Agent",
+            "type": "string"
+          },
+          "cost": {
+            "title": "Cost",
+            "type": "integer"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "human_decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Human Decision"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "unit",
+          "agent",
+          "action",
+          "cost",
+          "decision",
+          "reason"
+        ],
+        "title": "DecisionRow",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -157,6 +258,114 @@
           "request_id"
         ],
         "title": "MessageIn",
+        "type": "object"
+      },
+      "ReviewIn": {
+        "properties": {
+          "approve": {
+            "title": "Approve",
+            "type": "boolean"
+          },
+          "intervention_id": {
+            "title": "Intervention Id",
+            "type": "integer"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewer": {
+            "minLength": 1,
+            "title": "Reviewer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "intervention_id",
+          "reviewer",
+          "approve"
+        ],
+        "title": "ReviewIn",
+        "type": "object"
+      },
+      "ReviewOut": {
+        "properties": {
+          "blocked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "executed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executed"
+          },
+          "final_decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Decision"
+          },
+          "human_decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Human Decision"
+          },
+          "intervention_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intervention Id"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "ReviewOut",
         "type": "object"
       },
       "SessionOut": {
@@ -212,6 +421,53 @@
           "trace"
         ],
         "title": "SessionOut",
+        "type": "object"
+      },
+      "SummaryOut": {
+        "properties": {
+          "adoption": {
+            "$ref": "#/components/schemas/AdoptionOut"
+          },
+          "by_agent": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "title": "By Agent",
+            "type": "object"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "policy_pass_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Pass Rate"
+          },
+          "spent": {
+            "title": "Spent",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "counts",
+          "by_agent",
+          "spent",
+          "adoption"
+        ],
+        "title": "SummaryOut",
         "type": "object"
       },
       "TraceEntry": {
@@ -288,6 +544,170 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/orchestration/pending": {
+      "get": {
+        "description": "사람 승인 대기. 이미 판단한 건은 빠진다.",
+        "operationId": "orchestration_pending_orchestration_pending_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DecisionRow"
+                  },
+                  "title": "Response Orchestration Pending Orchestration Pending Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Orchestration Pending"
+      }
+    },
+    "/orchestration/recent": {
+      "get": {
+        "description": "최근 결정. **실행된 것만 보면 통제가 안 보인다.**",
+        "operationId": "orchestration_recent_orchestration_recent_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "decision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Decision"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DecisionRow"
+                  },
+                  "title": "Response Orchestration Recent Orchestration Recent Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Orchestration Recent"
+      }
+    },
+    "/orchestration/review": {
+      "post": {
+        "description": "사람의 판단을 받는다. **승인해도 규칙은 그대로 걸린다.**\n\n대기 건은 묵는다. 그 사이 다른 에이전트가 그 단위를 가져갔다면 사람이\n승인했다는 이유로 한 단위 한 개입을 건너뛸 수 없다 — 그러면 사람의 손을 거친\n건이 오히려 측정을 깨는 통로가 된다. 그래도 **사람의 판단은 남긴다.**",
+        "operationId": "orchestration_review_orchestration_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Orchestration Review"
+      }
+    },
+    "/orchestration/summary": {
+      "get": {
+        "description": "콘솔 첫 화면. **두 비율을 따로 낸다.**\n\n예산이 모자라 거절된 제안은 \"사람이 AI 를 안 믿었다\" 가 아니다. 하나로 묶으면\n예산을 줄이는 것만으로 채택률이 떨어지고, 그 숫자를 보고 모델을 의심하게 된다.",
+        "operationId": "orchestration_summary_orchestration_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummaryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Orchestration Summary"
       }
     },
     "/support/confirm": {

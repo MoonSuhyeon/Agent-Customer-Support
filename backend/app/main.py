@@ -7,6 +7,11 @@
     POST /support/confirm         고객 승인 → 상태 변경 실행
     GET  /support/sessions/{id}   현재 상태와 트레이스
 
+    GET  /orchestration/summary   결정 분포, 정책 통과율, 사람 채택률
+    GET  /orchestration/recent    최근 결정 — **거절 사유까지**
+    GET  /orchestration/pending   사람 승인 대기
+    POST /orchestration/review    사람의 판단을 받는다
+
 화면은 이 저장소에 없다. 운영 콘솔이 이 API 를 호출한다 — 저장소마다 화면을 따로
 두면 같은 규칙이 여러 곳으로 갈라지기 때문이다.
 """
@@ -20,12 +25,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.graph import build_graph
 from app.domain import seed
+from app.orchestration.console import Console
+from app.orchestration.ledger import Decision, Ledger
 
 app = FastAPI(title="Agent Customer Support", version="0.1.0")
 
 _store = seed()
 _checkpointer = MemorySaver()
 _agent = build_graph(_store, today=date.today(), checkpointer=_checkpointer)
+
+# 개입 원장은 상담 상태와 **다른 저장소**다. 콘솔은 그걸 읽기만 한다 —
+# 결정은 조정자가 하고, 여기서 규칙을 한 벌 더 쓰면 두 곳이 어긋난다.
+_console = Console(Ledger())
 
 
 def _cfg(session_id: str) -> dict:
@@ -155,6 +166,107 @@ def get_session(session_id: str) -> SessionOut:
         decision=snap.values.get("decision"),
         trace=snap.values.get("trace", []),
     )
+
+
+# ─────────────────────────────────────────────────── 콘솔 (A6)
+class DecisionRow(BaseModel):
+    """원장 한 줄. **거절 사유가 필수다** — 이유 없는 거절은 콘솔에서 쓸모가 없다."""
+
+    id: int
+    unit: str
+    agent: str
+    action: str
+    cost: int
+    decision: str
+    reason: str
+    reviewed_by: str | None = None
+    human_decision: str | None = None
+
+
+class AdoptionOut(BaseModel):
+    """AI 권고 채택률. **사람이 판단한 것만 센다.**"""
+
+    reviewed: int
+    accepted: int
+    pending: int
+    #: `null` 은 0 이 아니라 "아직 말할 수 없음" 이다. 화면이 0% 로 그리면
+    #: 사람이 전부 거절한 것처럼 보인다.
+    rate: float | None = None
+
+
+class SummaryOut(BaseModel):
+    counts: dict[str, int]
+    by_agent: dict[str, dict[str, int]]
+    spent: int
+    #: 조정자가 자동으로 통과시킨 비율. **채택률과 다른 숫자다.**
+    policy_pass_rate: float | None = None
+    adoption: AdoptionOut
+
+
+class ReviewIn(BaseModel):
+    intervention_id: int
+    reviewer: str = Field(min_length=1)
+    approve: bool
+    reason: str = ""
+
+
+class ReviewOut(BaseModel):
+    ok: bool
+    error: str | None = None
+    intervention_id: int | None = None
+    #: 사람이 뭐라 했나.
+    human_decision: str | None = None
+    #: 규칙까지 통과한 뒤의 최종 상태. **사람의 판단과 다를 수 있다.**
+    final_decision: str | None = None
+    executed: bool | None = None
+    #: 사람은 승인했는데 규칙이 막았다면 그 이유.
+    blocked: str | None = None
+
+
+@app.get("/orchestration/summary", response_model=SummaryOut)
+def orchestration_summary() -> SummaryOut:
+    """콘솔 첫 화면. **두 비율을 따로 낸다.**
+
+    예산이 모자라 거절된 제안은 "사람이 AI 를 안 믿었다" 가 아니다. 하나로 묶으면
+    예산을 줄이는 것만으로 채택률이 떨어지고, 그 숫자를 보고 모델을 의심하게 된다.
+    """
+    s = _console.summary()
+    return SummaryOut(
+        counts=s.counts, by_agent=s.by_agent, spent=s.spent,
+        policy_pass_rate=s.policy_pass_rate,
+        adoption=AdoptionOut(reviewed=s.adoption.reviewed, accepted=s.adoption.accepted,
+                             pending=s.adoption.pending, rate=s.adoption.rate),
+    )
+
+
+@app.get("/orchestration/recent", response_model=list[DecisionRow])
+def orchestration_recent(limit: int = 50, decision: str | None = None) -> list[DecisionRow]:
+    """최근 결정. **실행된 것만 보면 통제가 안 보인다.**"""
+    want = None
+    if decision is not None:
+        try:
+            want = Decision(decision)
+        except ValueError:
+            raise HTTPException(400, f"그런 결정은 없습니다: {decision}")
+    return [DecisionRow(**r) for r in _console.recent(limit=limit, decision=want)]
+
+
+@app.get("/orchestration/pending", response_model=list[DecisionRow])
+def orchestration_pending(limit: int = 100) -> list[DecisionRow]:
+    """사람 승인 대기. 이미 판단한 건은 빠진다."""
+    return [DecisionRow(**r) for r in _console.pending(limit=limit)]
+
+
+@app.post("/orchestration/review", response_model=ReviewOut)
+def orchestration_review(payload: ReviewIn) -> ReviewOut:
+    """사람의 판단을 받는다. **승인해도 규칙은 그대로 걸린다.**
+
+    대기 건은 묵는다. 그 사이 다른 에이전트가 그 단위를 가져갔다면 사람이
+    승인했다는 이유로 한 단위 한 개입을 건너뛸 수 없다 — 그러면 사람의 손을 거친
+    건이 오히려 측정을 깨는 통로가 된다. 그래도 **사람의 판단은 남긴다.**
+    """
+    return ReviewOut(**_console.review(
+        payload.intervention_id, payload.reviewer, payload.approve, payload.reason))
 
 
 @app.get("/health")
