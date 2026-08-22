@@ -31,26 +31,30 @@ Policy lookup reuses the retrieval core from
 returns *something*, so that core also carries an abstain path — otherwise
 attaching retrieval would have quietly broken the no-guessing rule.
 
-**8/8 scenarios** · **0% misinformation** · duplicate requests refund **once** · **33 tests**
+**8/8 scenarios** · **0% misinformation** · duplicate requests refund **once** · **126 tests**
 
 ---
 
 ## Architecture
 
-```
-              ┌────────────────────────────────────────────────┐
-              │  OPERATOR CONSOLE  — lives in Data-Growth      │
-              │      request  →  ⏸ approve  →  result          │
-              │  amount and policy shown before approval       │
-              │  one console for four services, not four UIs   │
-              └───────────────────────┬────────────────────────┘
-                                      │  HTTP
-                                      ▼
+   ┌──────────────────────────────┐  ┌──────────────────────────────┐
+   │  CUSTOMER — in Data-Growth   │  │  OPERATOR — in Data-Growth   │
+   │  my bookings → ask to cancel │  │  waiting queue → approve     │
+   │  the booking id rides along  │  │  amount + policy shown first │
+   │  nobody types it             │  │  one console, four services  │
+   └───────────────┬──────────────┘  └───────────────┬──────────────┘
+                   │      HTTP + the caller's token  │
+                   └──────────────┬──────────────────┘
+                                  ▼
         ┌──────────────────────────────────────────────────────────┐
         │                    AGENT API  (FastAPI)                  │
         │                                                          │
         │  POST /support/messages      start or continue           │
+        │       + booking_id           what the screen already     │
+        │                              knows. A typo here would    │
+        │                              point at someone else's     │
         │  POST /support/confirm       customer approval  ← gate   │
+        │  GET  /support/sessions      the waiting queue           │
         │  GET  /support/sessions/{id} state and full trace        │
         │                                                          │
         │  confirm is a separate endpoint because the graph        │
@@ -151,7 +155,7 @@ attaching retrieval would have quietly broken the no-guessing rule.
 | API | FastAPI · Pydantic v2 · SSE |
 | Retrieval | `marketplace-retrieval` (from RAG-Marketing) |
 | Storage | PostgreSQL (domain + graph checkpoints) |
-| Testing | pytest — 33 tests |
+| Testing | pytest — 126 tests |
 
 Runs without an API key. Intent classification defaults to deterministic rules —
 in a path where a wrong classification costs money, the rule is the baseline and
@@ -214,6 +218,13 @@ repaired.
 **Costs** — eventual consistency. A brief window exists where the booking is
 cancelled and the refund has not landed.
 
+This applies to the in-memory store, where cancelling and refunding are two steps.
+Against the booking service they are **one atomic request**, so the in-between
+state never exists and there is nothing to compensate. `RemoteStore.cancel` is
+therefore a no-op that returns the booking — writing a separate call order for the
+remote path would give `cancel_and_refund` two implementations, and one of them
+would eventually be fixed alone.
+
 ### Deterministic rules as the intent baseline
 
 **Buys** — no model call on the classification path, so no token cost and no
@@ -222,17 +233,58 @@ returns `UNKNOWN` and escalates rather than guessing.
 **Costs** — narrow phrasing coverage. Requests worded outside the rule set
 escalate that would not need to, which shows up as a higher escalation rate.
 
+### The agent does not own the bookings it acts on
+
+This service shipped with four hardcoded demo bookings. A customer opening an
+inquiry brings a real booking number, and that store would never find it — a
+button that fails on 100% of real bookings.
+
+**Buys** — `RemoteStore` reads from the booking service instead, so the agent works
+on real reservations. Authorisation came free: it calls **`/bookings/me` with the
+caller's token** rather than `/bookings/{id}`, so the range it can see is the
+caller's own bookings. Nothing had to be written to keep it out of other people's
+data; it simply cannot reach them. When a number is not in that list, the answer
+does not distinguish "no such booking" from "not yours" — telling them apart lets
+someone probe for the existence of other people's reservations.
+**Costs** — a network hop inside the graph, and a second failure mode. "The booking
+service is unreachable" is not "the booking does not exist", so it answers 503
+rather than escalating as if the reservation were missing.
+
+### The refund amount is not this service's to compute
+
+The agent explained a policy and quoted an amount. The booking service refunded
+`total_price` regardless of when you cancelled. So the agent would say *0원 환불*
+and 90,000원 would leave — the explanation, which is this agent's whole reason to
+exist, became a lie.
+
+The other repair was to let the caller pass the amount. That opens forgery: the
+customer's browser can call the same endpoint.
+
+**Buys** — the policy moved to the service that owns the money, and the agent asks
+for the number instead of deriving it (`store.refund_quote`). Quote and charge run
+the same function, so they cannot drift. The write call sends **no amount at all**.
+**Costs** — this repository no longer explains cancellation rules on its own; it
+needs the booking service up to say anything about money. The trade is that
+explanation and execution can no longer disagree.
+
 ### No UI in this repository
 
-The approval gate is the point of this project, so it needs a screen. That screen
-lives in the operator console instead of here.
+The approval gate is the point of this project, so it needs a screen. There are
+now two — the customer opening an inquiry and the operator approving it — and both
+live in Data-Growth rather than here.
 
 **Buys** — one console serves four services, so the design system, the navigation
 and the build exist once rather than four times. This repository stays what it is:
 a graph, a safety contract, and an API. Nothing here needs Node.
-**Costs** — you cannot clone this repository and see the approval screen. The gate
-is still demonstrable without it — `scripts/run_agent_demo.py` walks the whole loop
+**Costs** — you cannot clone this repository and see either screen. The gate is
+still demonstrable without them — `scripts/run_agent_demo.py` walks the whole loop
 and `/docs` lets you drive it by hand — but the visual proof is one repository away.
+
+For a long time only the operator screen existed, and it worked by having staff
+type the customer's sentence themselves. The page was called *approvals* while
+**nothing ever arrived to approve**: no path existed for a customer to open a
+session. `GET /support/sessions?awaiting=true` and the entry point in
+`/my/bookings` are what made the name true.
 
 ### Retrieval with an abstain path
 
@@ -252,7 +304,7 @@ dial, and it is set conservatively.
 ```bash
 pip install -r backend/requirements.txt
 cd backend
-pytest                          # 33 tests
+pytest                          # 126 tests
 python scripts/run_agent_demo.py
 
 uvicorn app.main:app --reload   # API docs at /docs
@@ -260,6 +312,17 @@ uvicorn app.main:app --reload   # API docs at /docs
 
 Runs without an API key and without Node. `run_agent_demo.py` walks the full loop
 in the terminal; `/docs` lets you drive the approval gate by hand.
+
+Real reservations need the booking service alongside it:
+
+```bash
+BOOKING_API_URL=http://127.0.0.1:8000 uvicorn app.main:app --reload
+```
+
+Without it the demo bookings (`B1001`–`B1004`) still work — they live in this
+service. Numbers starting with `BK` are routed to the booking service instead, so
+the two paths are told apart by the shape of the id, which is exactly what makes
+them two stores.
 
 The console that calls this API lives in
 [Data-Growth](https://github.com/MoonSuhyeon/Data-Growth) — one operator screen for four services rather than four
