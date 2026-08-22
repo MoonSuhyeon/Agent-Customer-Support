@@ -37,6 +37,7 @@ attaching retrieval would have quietly broken the no-guessing rule.
 
 ## Architecture
 
+```
    ┌──────────────────────────────┐  ┌──────────────────────────────┐
    │  CUSTOMER — in Data-Growth   │  │  OPERATOR — in Data-Growth   │
    │  my bookings → ask to cancel │  │  waiting queue → approve     │
