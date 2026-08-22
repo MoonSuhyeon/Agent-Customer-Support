@@ -17,14 +17,17 @@
 """
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.graph import build_graph
 from app.domain import seed
+from app.remote import (RemoteBookingUnavailable, RemoteStore, begin_request,
+                        end_request)
 from app.orchestration.console import Console
 from app.orchestration.ledger import Decision, Ledger
 
@@ -33,6 +36,27 @@ app = FastAPI(title="Agent Customer Support", version="0.1.0")
 _store = seed()
 _checkpointer = MemorySaver()
 _agent = build_graph(_store, today=date.today(), checkpointer=_checkpointer)
+
+# 실제 예약(예약 서비스가 가진 것)을 다루는 그래프.
+#
+# 그래프를 둘로 나눈 이유가 있다. `Store` 는 그래프를 만들 때 묶이는데, 요청마다
+# 어느 store 를 쓸지 갈라야 한다. 매 요청 그래프를 새로 만들면 체크포인터가
+# 붙는 자리가 흔들린다 — 같은 체크포인터를 공유하되 store 만 다른 그래프를
+# 두 개 두는 편이 단순하다.
+_remote_store = RemoteStore()
+_remote_agent = build_graph(_remote_store, today=date.today(), checkpointer=_checkpointer)
+
+
+def _pick_agent(booking_id: str | None):
+    """어느 store 로 볼 것인가.
+
+    데모 예약은 `B1002`, 실제 예약은 `BK2608190016` 이다. 접두사로 가른다 —
+    **번호 체계가 다르다는 사실 자체가 두 저장소가 다르다는 뜻**이라, 여기서
+    굳이 감출 이유가 없다.
+    """
+    if booking_id and booking_id.startswith("BK"):
+        return _remote_agent
+    return _agent
 
 # 개입 원장은 상담 상태와 **다른 저장소**다. 콘솔은 그걸 읽기만 한다 —
 # 결정은 조정자가 하고, 여기서 규칙을 한 벌 더 쓰면 두 곳이 어긋난다.
@@ -43,6 +67,28 @@ def _cfg(session_id: str) -> dict:
     return {"configurable": {"thread_id": session_id}}
 
 
+@dataclass
+class SessionRecord:
+    """누가 어느 예약으로 문의를 열었나.
+
+    체크포인터(`MemorySaver`)는 세션 **상태**를 들고 있지만 "어떤 세션들이
+    있는가" 는 답하지 못한다. 콘솔이 승인 대기 목록을 그리려면 그 질문에 답할
+    곳이 필요하다.
+
+    **메모리에 둔다.** 체크포인터 자체가 메모리라, 이것만 파일에 남기면 재시작
+    뒤에 "세션은 목록에 있는데 열면 없는" 상태가 된다. 두 저장소의 수명이
+    어긋나는 것이 목록이 비는 것보다 나쁘다.
+    """
+
+    session_id: str
+    booking_id: str | None
+    opened_at: datetime
+    last_message: str
+
+
+_sessions: dict[str, SessionRecord] = {}
+
+
 def _awaiting(session_id: str) -> bool:
     return _agent.get_state(_cfg(session_id)).next == ("execute",)
 
@@ -51,6 +97,12 @@ class MessageIn(BaseModel):
     session_id: str = Field(min_length=1)
     message: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
+    #: 어느 예약에 대한 문의인가. **고객 화면에서 시작하면 이게 실린다.**
+    #:
+    #: 없으면 그래프가 문장에서 `B1002` 같은 패턴을 찾아낸다(`extract_booking_id`).
+    #: 그 방식은 직원이 콘솔에서 타이핑할 때는 쓸 수 있지만, 고객에게 예약번호를
+    #: 외워서 적으라고 할 수는 없다 — 오타 하나면 남의 예약을 조회하게 된다.
+    booking_id: str | None = None
 
 
 class ConfirmIn(BaseModel):
@@ -111,16 +163,41 @@ def _out(session_id: str, state: dict) -> AgentOut:
 
 
 @app.post("/support/messages", response_model=AgentOut)
-def send_message(body: MessageIn) -> AgentOut:
-    state = _agent.invoke(
-        {"message": body.message, "request_id": body.request_id, "trace": []},
-        _cfg(body.session_id),
+def send_message(body: MessageIn, authorization: str | None = Header(None)) -> AgentOut:
+    payload: dict = {"message": body.message, "request_id": body.request_id, "trace": []}
+    if body.booking_id:
+        payload["booking_id"] = body.booking_id
+
+    # 호출자의 토큰을 문맥에 싣는다. 원격 store 가 `/bookings/me` 를 부를 때
+    # 이걸 쓴다 — **그래서 에이전트가 볼 수 있는 범위가 호출자 본인의 예약으로
+    # 좁혀진다.** 권한 검사를 따로 짜는 것보다 애초에 못 보게 하는 편이 낫다.
+    token = authorization.removeprefix("Bearer ").strip() if authorization else None
+    scope = begin_request(token)
+    try:
+        state = _pick_agent(body.booking_id).invoke(payload, _cfg(body.session_id))
+    except RemoteBookingUnavailable as e:
+        # **"예약이 없다" 와 "예약 서비스에 못 닿았다" 는 다른 사실이다.**
+        # 500 으로 흘리면 화면이 둘을 구분하지 못하고, 고객은 자기 예약이
+        # 사라진 줄 안다.
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    finally:
+        end_request(scope)
+
+    # 장부를 남긴다. 이미 있으면 마지막 문장만 갱신한다 — 대화가 이어져도
+    # **연 시각은 처음 그대로**여야 대기 순서를 매길 수 있다.
+    prev = _sessions.get(body.session_id)
+    _sessions[body.session_id] = SessionRecord(
+        session_id=body.session_id,
+        booking_id=body.booking_id or (prev.booking_id if prev else None)
+                   or state.get("booking_id"),
+        opened_at=prev.opened_at if prev else datetime.now(timezone.utc),
+        last_message=body.message,
     )
     return _out(body.session_id, state)
 
 
 @app.post("/support/confirm", response_model=AgentOut)
-def confirm(body: ConfirmIn) -> AgentOut:
+def confirm(body: ConfirmIn, authorization: str | None = Header(None)) -> AgentOut:
     """고객 승인. **이 호출 없이는 상태 변경이 일어나지 않는다.**"""
     if not _awaiting(body.session_id):
         raise HTTPException(409, "확인 대기 중인 요청이 없습니다")
@@ -130,7 +207,22 @@ def confirm(body: ConfirmIn) -> AgentOut:
                         response="요청을 취소했습니다. 예약은 그대로 유지됩니다.",
                         awaiting_confirmation=False, escalated=False,
                         decision=snap.get("decision"))
-    state = _agent.invoke(None, _cfg(body.session_id))
+
+    # 실행할 때도 **연 그래프와 같은 store** 여야 한다. 다른 store 로 재개하면
+    # 조회는 실제 예약을 보고 취소는 데모 예약을 건드리게 된다.
+    rec = _sessions.get(body.session_id)
+    agent = _pick_agent(rec.booking_id if rec else None)
+
+    token = authorization.removeprefix("Bearer ").strip() if authorization else None
+    scope = begin_request(token)
+    try:
+        state = agent.invoke(None, _cfg(body.session_id))
+    except RemoteBookingUnavailable as e:
+        # 아직 쓰기가 연결되지 않았다. **아무 일도 안 일어났는데 취소됐다고
+        # 답하는 것이 최악이므로** 소리 내어 막는다.
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    finally:
+        end_request(scope)
     return _out(body.session_id, state)
 
 
@@ -150,6 +242,53 @@ class SessionOut(BaseModel):
     escalated: bool
     decision: DecisionOut | None = None
     trace: list[TraceEntry]
+
+
+class SessionSummary(BaseModel):
+    """세션 한 줄. 콘솔의 대기 목록이 쓴다."""
+
+    session_id: str
+    booking_id: str | None = None
+    opened_at: datetime
+    last_message: str
+    #: 사람 승인을 기다리는가. **이게 이 목록의 존재 이유다.**
+    awaiting_confirmation: bool
+    escalated: bool
+    response: str
+
+
+@app.get("/support/sessions", response_model=list[SessionSummary])
+def list_sessions(awaiting: bool = False) -> list[SessionSummary]:
+    """열린 문의 목록.
+
+    `awaiting=true` 면 **사람 승인을 기다리는 것만** 준다. 콘솔의 "상담 승인"
+    화면이 그리는 것이 그것이다 — 그 전까지는 승인할 대기 건 자체가 없어서
+    화면 이름이 하는 말과 실제가 어긋나 있었다.
+
+    최근에 열린 것이 위로 온다. 오래 기다린 것을 아래에 두는 건 이상해 보이지만,
+    대기 목록은 보통 **새로 들어온 것부터** 처리하는 화면이 아니라 훑는
+    화면이라 그렇다. 순서를 바꿔야 할 이유가 생기면 그때 바꾼다.
+    """
+    out: list[SessionSummary] = []
+    for rec in _sessions.values():
+        snap = _agent.get_state(_cfg(rec.session_id))
+        if not snap.values:
+            # 체크포인터에는 없는데 장부에만 있다 — 재시작 뒤에나 생기는 일이다.
+            # 목록에 넣으면 열었을 때 404 가 난다.
+            continue
+        waiting = snap.next == ("execute",)
+        if awaiting and not waiting:
+            continue
+        out.append(SessionSummary(
+            session_id=rec.session_id,
+            booking_id=rec.booking_id or snap.values.get("booking_id"),
+            opened_at=rec.opened_at,
+            last_message=rec.last_message,
+            awaiting_confirmation=waiting,
+            escalated=bool(snap.values.get("escalated")),
+            response=snap.values.get("response", ""),
+        ))
+    return sorted(out, key=lambda r: r.opened_at, reverse=True)
 
 
 @app.get("/support/sessions/{session_id}", response_model=SessionOut)
