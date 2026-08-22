@@ -38,7 +38,7 @@ from datetime import date, datetime
 import httpx
 
 from app.domain import (
-    Booking, BookingStatus, CancellationPolicy, Property, Store,
+    Booking, BookingStatus, CancellationPolicy, PaymentGatewayError, Property, Store,
 )
 
 #: 예약 서비스 주소.
@@ -117,6 +117,52 @@ class RemoteStore(Store):
             cache[booking_id] = found
         return found
 
+    def _uuid_of(self, booking_id: str) -> str | None:
+        """예약번호 → UUID.
+
+        예약 서비스의 환불·견적 경로는 UUID 로 받는데 에이전트가 아는 것은
+        `BK...` 번호다. 목록을 읽을 때 같이 기억해 둔다.
+        """
+        cache = _request_cache.get()
+        if cache is None or f"uuid:{booking_id}" not in cache:
+            self.get_booking(booking_id)     # 목록을 읽으면서 채워진다
+            cache = _request_cache.get()
+        return (cache or {}).get(f"uuid:{booking_id}")
+
+    def refund_quote(self, booking_id: str) -> dict | None:
+        """환불 예상액을 **예약 서비스에 묻는다.**
+
+        여기서 직접 계산하지 않는다. 돈을 소유한 쪽이 정책을 갖고 있고, 승인
+        뒤 실제로 깎는 것도 같은 규칙이다 — 물어보면 설명과 집행이 어긋날 수 없다.
+        """
+        uid = self._uuid_of(booking_id)
+        if uid is None:
+            return None
+        data = self._get(f"/api/v1/bookings/{uid}/refund-quote")
+        return {
+            "original_amount": data["total_price"],
+            "days_until_check_in": data["days_until_check_in"],
+            "refund_ratio": data["refund_ratio"],
+            "refund_amount": data["refund_amount"],
+            "policy": data["policy_description"],
+        }
+
+    def _get(self, path: str) -> dict:
+        token = caller_token.get()
+        if not token:
+            raise RemoteBookingUnavailable("호출자 인증 정보가 없어 예약을 조회할 수 없다")
+        try:
+            r = httpx.get(f"{self.base_url}{path}",
+                          headers={"Authorization": f"Bearer {token}"},
+                          timeout=self.timeout)
+        except httpx.HTTPError as e:
+            raise RemoteBookingUnavailable(f"예약 서비스에 닿지 못했다: {e}") from e
+        if r.status_code == 401:
+            raise RemoteBookingUnavailable("예약 서비스가 인증을 거절했다")
+        if r.status_code >= 400:
+            raise RemoteBookingUnavailable(f"예약 서비스가 {r.status_code} 로 답했다")
+        return r.json()
+
     def _fetch_booking(self, booking_id: str) -> Booking | None:
         token = caller_token.get()
         if not token:
@@ -138,7 +184,10 @@ class RemoteStore(Store):
         if r.status_code >= 400:
             raise RemoteBookingUnavailable(f"예약 서비스가 {r.status_code} 로 답했다")
 
+        cache = _request_cache.get()
         for row in r.json():
+            if cache is not None and row.get("id"):
+                cache[f"uuid:{row['booking_number']}"] = row["id"]
             if row.get("booking_number") != booking_id:
                 continue
             return Booking(
@@ -156,14 +205,63 @@ class RemoteStore(Store):
 
     # ------------------------------------------------------------ 쓰기
     def cancel(self, booking_id: str) -> Booking:
-        raise RemoteBookingUnavailable(
-            "실제 예약의 취소는 아직 이 경로로 처리하지 않는다 — "
-            "조회까지만 연결돼 있다")
+        """아무것도 하지 않는다. **취소는 환불과 한 번에 일어난다.**
+
+        메모리 store 에서는 취소와 환불이 두 단계라 그 사이에 실패할 수 있고,
+        그래서 보상 트랜잭션(`restore`)이 있다. 예약 서비스는 둘을 한 요청에서
+        원자적으로 처리하므로 **그 사이 상태가 아예 안 생긴다** — 보상할 것도
+        없다.
+
+        여기서 예외를 던지지 않는 것도 의도다. 호출부(`cancel_and_refund`)의
+        순서를 원격용으로 따로 짜면 두 벌이 되고, 한쪽만 고치는 날이 온다.
+        """
+        b = self.get_booking(booking_id)
+        if b is None:
+            raise KeyError(booking_id)
+        return b
 
     def refund(self, booking_id: str, amount: int) -> Booking:
-        raise RemoteBookingUnavailable(
-            "실제 예약의 환불은 아직 이 경로로 처리하지 않는다 — "
-            "조회까지만 연결돼 있다")
+        """실제로 취소하고 환불한다.
+
+        `amount` 를 **보내지 않는다.** 보내면 호출자가 환불액을 정하게 되고,
+        고객 브라우저도 같은 엔드포인트를 부를 수 있다. 금액은 예약 서비스가
+        자기 정책으로 다시 계산한다 — 에이전트가 설명한 값과 같은 규칙이다.
+        """
+        uid = self._uuid_of(booking_id)
+        if uid is None:
+            raise KeyError(booking_id)
+
+        token = caller_token.get()
+        if not token:
+            raise RemoteBookingUnavailable("호출자 인증 정보가 없어 환불할 수 없다")
+        try:
+            r = httpx.post(
+                f"{self.base_url}/api/v1/bookings/{uid}/refund",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"reason": "상담 에이전트를 통한 취소 요청"},
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError as e:
+            raise RemoteBookingUnavailable(f"예약 서비스에 닿지 못했다: {e}") from e
+
+        if r.status_code == 400:
+            # 이미 환불됐거나 확정 상태가 아니다. **장애가 아니라 사실이다.**
+            raise PaymentGatewayError(r.json().get("detail", "환불할 수 없는 예약이다"))
+        if r.status_code >= 400:
+            raise RemoteBookingUnavailable(f"예약 서비스가 {r.status_code} 로 답했다")
+
+        # 이 요청 안의 캐시는 이제 낡았다. 취소 전 상태를 계속 보게 된다.
+        cache = _request_cache.get()
+        if cache is not None:
+            cache.pop(booking_id, None)
+
+        b = Booking(
+            booking_id=booking_id, customer_id="self",
+            property_id=REMOTE_PROPERTY_ID,
+            check_in=date.today(), amount=int(r.json()["refund_amount"]),
+            status=BookingStatus.CANCELLED,
+        )
+        return b
 
 
 def begin_request(token: str | None):

@@ -101,6 +101,19 @@ class ReadTools:
         b = self.store.get_booking(booking_id)
         if b is None:
             return ToolResult(False, {}, f"예약 {booking_id} 을 찾을 수 없다")
+
+        # 저장소가 **권위 있는 금액**을 안다면 그것을 쓴다.
+        #
+        # 실제 예약은 예약 서비스가 소유하고, 환불액도 거기서 정한다. 여기서
+        # 같은 산수를 한 번 더 하면 두 곳이 각자 계산하게 되고, 한쪽 구간만
+        # 고쳤을 때 **설명과 집행이 조용히 갈린다.** 물어볼 수 있으면 묻는다.
+        quote = getattr(self.store, "refund_quote", None)
+        if callable(quote):
+            q = quote(booking_id)
+            if q is None:
+                return ToolResult(False, {}, "환불 금액을 확인할 수 없다")
+            return ToolResult(True, {"booking_id": booking_id, **q})
+
         found = self.policy_retriever.lookup(b.property_id)
         if not found:
             return ToolResult(False, {},

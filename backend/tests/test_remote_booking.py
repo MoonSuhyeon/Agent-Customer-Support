@@ -29,11 +29,26 @@ CHECK_IN = (date.today() + timedelta(days=10)).isoformat() + "T15:00:00"
 
 #: 예약 서비스가 돌려주는 모양. 실제 응답에서 그대로 가져왔다.
 MY_BOOKINGS = [
-    {"booking_number": "BK2608190016", "status": "CONFIRMED",
+    {"id": "11111111-1111-1111-1111-111111111111",
+     "booking_number": "BK2608190016", "status": "CONFIRMED",
      "total_price": 90000, "check_in": CHECK_IN},
-    {"booking_number": "BK2608160042", "status": "CANCELLED",
+    {"id": "22222222-2222-2222-2222-222222222222",
+     "booking_number": "BK2608160042", "status": "CANCELLED",
      "total_price": 120000, "check_in": CHECK_IN},
 ]
+
+#: 견적. **에이전트는 이 값을 그대로 쓴다** — 자기가 계산하지 않는다.
+QUOTE = {
+    "booking_id": MY_BOOKINGS[0]["id"],
+    "total_price": 90000,
+    "days_until_check_in": 10,
+    "refund_ratio": 1.0,
+    "refund_amount": 90000,
+    "policy_name": "표준 취소 정책",
+    "policy_description": "체크인 7일 전까지 100% 환불, 이후 환불 불가",
+    "refundable": True,
+    "reason": None,
+}
 
 
 @pytest.fixture
@@ -44,14 +59,20 @@ def booking_api(monkeypatch):
 
     def fake_get(url, headers=None, timeout=None):
         token = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
-        calls.append(token)
         if token == "bad":
             return httpx.Response(401, json={"detail": "Unauthorized"})
+        if "refund-quote" in url:
+            return httpx.Response(200, json=QUOTE)
+        calls.append(token)
         if token == "other":
             return httpx.Response(200, json=[])      # 다른 고객 — 목록이 비어 있다
         return httpx.Response(200, json=MY_BOOKINGS)
 
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return httpx.Response(200, json={"refund_amount": QUOTE["refund_amount"]})
+
     monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
     return calls
 
 
@@ -76,14 +97,15 @@ def test_a_real_booking_number_is_found(booking_api):
     assert out["decision"]["proceed"] is True
 
 
-def test_the_refund_uses_the_real_amount(booking_api):
-    """정책은 에이전트가, 금액은 예약 서비스가 준다.
+def test_the_amount_comes_from_the_booking_service(booking_api):
+    """**에이전트가 금액을 계산하지 않는다.**
 
-    체크인이 10일 남았으므로 표준 정책의 100% 구간이다.
+    돈을 소유한 쪽이 정책을 갖고 있고, 승인 뒤 실제로 깎는 것도 같은 규칙이다.
+    여기서 한 번 더 계산하면 한쪽 구간만 고쳤을 때 설명과 집행이 조용히 갈린다.
     """
     _, r = ask("BK2608190016")
 
-    assert r.json()["decision"]["refund_amount"] == 90000
+    assert r.json()["decision"]["refund_amount"] == QUOTE["refund_amount"]
 
 
 def test_a_cancelled_booking_is_refused(booking_api):
@@ -149,19 +171,37 @@ def test_an_unreachable_service_is_not_a_missing_booking(monkeypatch):
 
 
 # ─────────────────────────────────────── 3. 아직 안 되는 것은 소리 내어 막는다
-def test_executing_a_real_cancellation_is_refused_loudly(booking_api):
-    """쓰기는 아직 연결되지 않았다.
-
-    **아무 일도 안 일어났는데 "취소했습니다" 라고 답하는 것이 최악이다.**
-    """
+def test_approving_actually_refunds(booking_api):
+    """승인하면 예약 서비스에 실제로 환불이 들어간다."""
     sid, r = ask("BK2608190016")
     assert r.json()["awaiting_confirmation"] is True
 
     done = client.post("/support/confirm",
                        json={"session_id": sid, "approved": True},
                        headers={"Authorization": "Bearer mine"})
-    assert done.status_code == 501
-    assert "아직" in done.json()["detail"]
+    assert done.status_code == 200, done.text
+    assert done.json()["awaiting_confirmation"] is False
+
+
+def test_the_agent_never_sends_the_amount(booking_api, monkeypatch):
+    """**금액을 보내면 호출자가 환불액을 정하게 된다.**
+
+    고객 브라우저도 같은 엔드포인트를 부를 수 있으므로, 금액을 실어 보내는
+    구조는 그 자체로 위조 통로다.
+    """
+    sent: list[dict] = []
+
+    def capture(url, headers=None, json=None, timeout=None):
+        sent.append(json or {})
+        return httpx.Response(200, json={"refund_amount": QUOTE["refund_amount"]})
+
+    monkeypatch.setattr(httpx, "post", capture)
+    sid, _ = ask("BK2608190016")
+    client.post("/support/confirm", json={"session_id": sid, "approved": True},
+                headers={"Authorization": "Bearer mine"})
+
+    assert sent, "환불이 안 나갔다"
+    assert "amount" not in sent[0] and "refund_amount" not in sent[0]
 
 
 def test_a_store_without_a_token_says_so():
